@@ -1,0 +1,9 @@
+.env
+config.json
+node_modules/
+dist/
+logs/
+captures/
+sse-failures/
+.superpowers/
+instances/proxy-*/

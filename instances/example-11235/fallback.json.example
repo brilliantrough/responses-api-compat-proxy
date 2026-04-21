@@ -1,0 +1,9 @@
+{
+  "fallback_api_config": [
+    {
+      "name": "fallback-b",
+      "base_url": "https://fallback-b.example",
+      "api_key_env": "FALLBACK_B_API_KEY"
+    }
+  ]
+}

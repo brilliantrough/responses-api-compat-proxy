@@ -1,0 +1,344 @@
+# Operations
+
+Deployment, process management, and operational procedures for the Responses API Compatibility Proxy.
+
+---
+
+## Table of Contents
+
+- [Multi-Instance Layout](#multi-instance-layout)
+- [Do Not Commit Real Instance Directories](#do-not-commit-real-instance-directories)
+- [Build and Run Commands](#build-and-run-commands)
+- [Development Command](#development-command)
+- [Health and Admin Endpoints](#health-and-admin-endpoints)
+- [Logs and Captures — Ignored Directories](#logs-and-captures--ignored-directories)
+- [Safe Restart Pattern](#safe-restart-pattern)
+- [Systemd Template](#systemd-template)
+- [Migration from Local Working Directory](#migration-from-local-working-directory)
+
+---
+
+## Multi-Instance Layout
+
+Each proxy instance is configured by a dedicated directory under `instances/`. The directory name conventionally matches the instance name and encodes the port for easy identification:
+
+```
+instances/
+  example-11234/        ← shipped example template
+    .env.example
+    fallback.json.example
+    model-map.json.example
+  example-11235/        ← shipped example template
+    .env.example
+    fallback.json.example
+    model-map.json.example
+  proxy-11234/          ← runtime instance (gitignored)
+    .env
+    fallback.json
+    model-map.json
+  proxy-11235/          ← runtime instance (gitignored)
+    .env
+    fallback.json
+    model-map.json
+```
+
+To add a new instance:
+
+1. Copy an example directory:
+   ```bash
+   cp -r instances/example-11234 instances/proxy-NEWPORT
+   ```
+2. Edit `instances/proxy-NEWPORT/.env` — set `PORT`, `INSTANCE_NAME`, provider credentials, and file paths.
+3. Edit `instances/proxy-NEWPORT/fallback.json` and `model-map.json` as needed.
+4. Start the instance using the systemd template or `npm run proxy:start`.
+
+---
+
+## Do Not Commit Real Instance Directories
+
+The `.gitignore` excludes `instances/proxy-*/` so that real instance directories containing secrets (API keys, provider URLs) are never committed. Only the `example-*` template directories are tracked.
+
+**Never commit:**
+
+- `instances/proxy-*` directories.
+- Real `.env` files.
+- `config.json` or real `fallback.json` / `model-map.json` files with live credentials.
+- `logs/`, `captures/`, or `sse-failures/` directories.
+- Debug capture output.
+
+---
+
+## Build and Run Commands
+
+| Command | Purpose |
+| --- | --- |
+| `npm run build` | Compile TypeScript source to `dist/`. |
+| `npm run proxy:start` | Run the compiled proxy from `dist/json-proxy.js`. Uses environment variables for configuration. |
+| `npm run proxy` | Run the proxy through `tsx` without a separate compile step (convenience alias). |
+
+Production deployments normally run `npm run build` first, then `npm run proxy:start`. The `run.sh` wrapper script handles both steps.
+
+---
+
+## Development Command
+
+| Command | Purpose |
+| --- | --- |
+| `npm run proxy:dev` | Start the proxy via `tsx` for live development. |
+
+This skips the explicit build step and runs the TypeScript source directly.
+
+---
+
+## Health and Admin Endpoints
+
+### GET /healthz
+
+Returns a JSON object with instance status, configuration summary, and the current `activeRequests` count. The response includes more configuration fields than this abbreviated example; use it as an operator-facing snapshot, not as a strict schema.
+
+```json
+{
+  "ok": true,
+  "instanceName": "proxy-11234",
+  "activeRequests": 3,
+  "maxConcurrentRequests": 128,
+  "cachedResponses": 12,
+  "port": 11234,
+  "host": "0.0.0.0"
+}
+```
+
+### GET /admin/stats
+
+Returns detailed runtime statistics including per-endpoint health, fallback counts, usage aggregates, and all proxy counters. The object is intended for diagnostics and may grow as additional counters are added.
+
+```json
+{
+  "instanceName": "proxy-11234",
+  "activeRequests": 3,
+  "stats": {
+    "requestsTotal": 1500,
+    "responsesJson": 200,
+    "responsesSseNormalized": 1280,
+    "responsesSseRaw": 15,
+    "upstreamTimeouts": 5,
+    "fallbackReasons": {
+      "upstream5xx": 0,
+      "headersOnlyTimeout": 1,
+      "streamMissingUsage": 0
+    },
+    "usageResponses": 1400,
+    "usageInputTokens": 250000,
+    "usageOutputTokens": 80000
+  },
+  "endpointHealth": [
+    {
+      "name": "primary-provider",
+      "state": "closed",
+      "failureCount": 0,
+      "successCount": 120
+    }
+  ]
+}
+```
+
+### POST /admin/cache/clear
+
+Clears the in-memory response cache. Returns the number of entries removed.
+
+```json
+{
+  "ok": true,
+  "clearedResponses": 12,
+  "cachedResponses": 0
+}
+```
+
+### GET /v1/models
+
+Proxies the upstream `/v1/models` endpoint, applying model alias mappings.
+
+### GET /v1/responses/:id
+
+Looks up a previously cached response by ID. Returns `404` if not found.
+
+### POST /v1/responses
+
+Main proxy endpoint. Accepts OpenAI Responses API requests and forwards to the configured upstream provider with normalization, fallback, and streaming support.
+
+**Warning:** These admin endpoints are intended for local or trusted-network operation. Do not expose them to the public internet without authentication and authorization.
+
+---
+
+## Logs and Captures — Ignored Directories
+
+The `.gitignore` excludes these runtime directories:
+
+| Directory | Contents | Risk |
+| --- | --- | --- |
+| `logs/` | Request logs. | May contain prompt fragments. |
+| `captures/` | Debug captures from SSE failures and missing-usage diagnostics. | Contains full prompts and upstream responses. |
+| `sse-failures/` | Raw upstream SSE text for failed reconstruction. | Contains full prompts and upstream responses. |
+| `dist/` | Compiled output. | Rebuildable; no secrets expected. |
+
+Debug captures are disabled by default. When enabled during incident investigation, disable them immediately afterward and delete captured files.
+
+Relevant environment variables:
+
+```env
+PROXY_DEBUG_SSE=0
+PROXY_SSE_FAILURE_DEBUG=0
+PROXY_SSE_FAILURE_DIR=captures/proxy-11234/sse-failures
+PROXY_STREAM_MISSING_USAGE_DEBUG=0
+PROXY_STREAM_MISSING_USAGE_DIR=captures/proxy-11234/stream/missing-usage
+PROXY_STREAM_MODE=normalized
+```
+
+---
+
+## Safe Restart Pattern
+
+To restart a proxy instance without dropping in-flight requests, use the `wait-proxy-idle.sh` script. It polls the `/healthz` endpoint and returns only when `activeRequests` reaches zero (or the service is already stopped).
+
+### Usage
+
+```bash
+# Wait for a specific instance by name and port
+./wait-proxy-idle.sh proxy-NEWPORT NEWPORT
+
+# Then restart the service
+systemctl --user restart responses-proxy@proxy-NEWPORT
+```
+
+### How it works
+
+1. Checks whether the systemd service is active. If not, exits immediately (safe to proceed).
+2. Polls `http://127.0.0.1:PORT/healthz` at a configurable interval (default 0.5s).
+3. Extracts `activeRequests` from the JSON response using a lightweight Node.js inline parser.
+4. When `activeRequests === 0`, exits with success — the service can be safely restarted.
+5. If the service stops while waiting, exits immediately (safe to proceed).
+
+### Environment overrides
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `WAIT_PROXY_IDLE_PORT` | Extracted from instance name suffix | Override the health check port. |
+| `WAIT_PROXY_IDLE_INTERVAL` | `0.5` | Seconds between polls. |
+| `WAIT_PROXY_IDLE_SERVICE` | `responses-proxy@<INSTANCE_NAME>` | systemd service name. |
+| `WAIT_PROXY_IDLE_STATUS_URL` | `http://127.0.0.1:<PORT>/healthz` | Health endpoint URL. |
+
+### Integration with systemd
+
+```bash
+# One-liner safe restart
+./wait-proxy-idle.sh proxy-NEWPORT NEWPORT && systemctl --user restart responses-proxy@proxy-NEWPORT
+```
+
+---
+
+## Systemd Template
+
+A systemd service template is provided at `deploy/systemd/responses-proxy@.service.example`.
+
+### Template contents
+
+```ini
+[Unit]
+Description=Responses API Compatibility Proxy (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/responses-api-compat-proxy
+EnvironmentFile=/opt/responses-api-compat-proxy/instances/%i/.env
+ExecStart=/usr/bin/env npm run proxy:start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
+```
+
+### Installation
+
+1. Copy the template to the appropriate systemd directory:
+
+   For a **user-level** service:
+   ```bash
+   mkdir -p ~/.config/systemd/user
+   cp deploy/systemd/responses-proxy@.service.example ~/.config/systemd/user/responses-proxy@.service
+   ```
+
+   For a **system-level** service:
+   ```bash
+   sudo cp deploy/systemd/responses-proxy@.service.example /etc/systemd/system/responses-proxy@.service
+   ```
+
+2. Adjust `WorkingDirectory` and `EnvironmentFile` paths to match your deployment location.
+3. Adjust `WantedBy` based on your installation mode:
+   - User services: `WantedBy=default.target`
+   - System services: `WantedBy=multi-user.target`
+4. Enable and start the instance:
+   ```bash
+   # User service
+   systemctl --user daemon-reload
+   systemctl --user enable --now responses-proxy@proxy-NEWPORT
+
+   # System service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now responses-proxy@proxy-NEWPORT
+   ```
+
+**Note:** The provided systemd example is a template. Operators should adapt `WorkingDirectory`, `EnvironmentFile`, `WantedBy`, and installation mode (user vs system services) to match their deployment environment.
+
+### Instance parameter
+
+The `%i` in the service name is replaced by the instance directory name. For example, `responses-proxy@proxy-11234` loads its environment from `instances/proxy-11234/.env`.
+
+### TimeoutStopSec
+
+The default `TimeoutStopSec=120` gives in-flight streaming requests up to two minutes to complete during a stop or restart. Adjust this value based on your `PROXY_TOTAL_REQUEST_TIMEOUT_MS` setting. If `PROXY_TOTAL_REQUEST_TIMEOUT_MS` is larger than `TimeoutStopSec`, systemd may force termination before the proxy's own total timeout expires.
+
+---
+
+## Migration from Local Working Directory
+
+If the proxy was initially run from a local working directory (e.g., a home directory checkout) and is being migrated to a deployment path:
+
+1. **Build at the target location:**
+   ```bash
+   cd /opt/responses-api-compat-proxy
+   npm install --omit=dev
+   npm run build
+   ```
+
+2. **Copy instance configurations:**
+   ```bash
+   mkdir -p instances/proxy-NEWPORT
+   cp /path/to/old/instances/proxy-NEWPORT/.env instances/proxy-NEWPORT/.env
+   cp /path/to/old/instances/proxy-NEWPORT/fallback.json instances/proxy-NEWPORT/fallback.json
+   cp /path/to/old/instances/proxy-NEWPORT/model-map.json instances/proxy-NEWPORT/model-map.json
+   ```
+
+3. **Update file paths in `.env`:**
+   Ensure `FALLBACK_CONFIG_PATH`, `MODEL_MAP_PATH`, and any debug directory paths reference the new location:
+   ```env
+   FALLBACK_CONFIG_PATH=./instances/proxy-NEWPORT/fallback.json
+   MODEL_MAP_PATH=./instances/proxy-NEWPORT/model-map.json
+   PROXY_SSE_FAILURE_DIR=captures/proxy-NEWPORT/sse-failures
+   PROXY_STREAM_MISSING_USAGE_DIR=captures/proxy-NEWPORT/stream/missing-usage
+   ```
+
+4. **Install and start the systemd service** using the template (see above).
+
+5. **Verify the migration:**
+   ```bash
+   curl -s http://127.0.0.1:NEWPORT/healthz
+   curl -s http://127.0.0.1:NEWPORT/admin/stats
+   ```
+
+6. **Stop the old process** once the new instance is confirmed healthy.
+
+7. **Clean up the old working directory** — remove any real instance directories, `.env` files, logs, and captures from the old location to avoid stale configuration or data exposure.

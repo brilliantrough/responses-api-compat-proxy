@@ -1,0 +1,36 @@
+{
+  "name": "responses-api-compat-proxy",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "basic": "tsx tools/basic-response.ts",
+    "check:connect-timeout-fallback": "tsx checks/check-connect-timeout-fallback.ts",
+    "check:connect-timeout-recovered-fallback": "tsx checks/check-connect-timeout-recovered-fallback.ts",
+    "check:config": "tsx checks/check-proxy-config.ts",
+    "check:fallback": "tsx checks/check-fallback-policy.ts",
+    "check:model-mapping": "tsx checks/check-model-mapping.ts",
+    "check:normalize": "tsx checks/check-input-normalization.ts",
+    "check:nonstream-fallback": "tsx checks/check-nonstream-fallback.ts",
+    "check:proxy-normalize": "tsx checks/check-proxy-normalization.ts",
+    "check:sse": "tsx checks/check-sse-reconstruction.ts",
+    "check:stream-first-text-timeout": "tsx checks/check-stream-first-text-timeout.ts",
+    "check:stream-fallback": "tsx checks/check-stream-fallback.ts",
+    "check:stream-no-false-fallback": "tsx checks/check-stream-no-false-fallback.ts",
+    "proxy": "tsx src/json-proxy.ts",
+    "proxy:dev": "tsx src/json-proxy.ts",
+    "proxy:start": "node dist/json-proxy.js",
+    "loadtest": "tsx tools/load-test-proxy.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/open-responses": "^1.0.6",
+    "ai": "^6.0.116",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}

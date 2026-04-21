@@ -1,0 +1,16 @@
+[Unit]
+Description=Responses API Compatibility Proxy (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/responses-api-compat-proxy
+EnvironmentFile=/opt/responses-api-compat-proxy/instances/%i/.env
+ExecStart=/usr/bin/env npm run proxy:start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
