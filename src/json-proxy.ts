@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { createServer } from 'node:http';
+import { resolve } from 'node:path';
 
 import { isJsonRecord, normalizeInput, type JsonRecord, type JsonValue } from './responses-input-normalization.js';
 import { createProxyRuntimeConfig, type StreamMode, type UpstreamEndpoint } from './proxy-config.js';
@@ -26,6 +27,9 @@ import {
   synthesizeResponseFromEvents,
   writeBufferedResponsesSse,
 } from './responses-sse.js';
+import { createAdminHandler } from './admin-api.js';
+import { createConfigFileStore } from './config-files.js';
+import { createRuntimeConfigStore } from './runtime-config.js';
 
 const config = createProxyRuntimeConfig();
 const {
@@ -78,6 +82,10 @@ const {
   upstreamTimeoutMs,
   upstreamUrl,
 } = config;
+
+const _adminConfigStore = createConfigFileStore(process.env.PROXY_ENV_PATH ?? resolve('.env'));
+const _adminRuntimeStore = createRuntimeConfigStore({ envPath: process.env.PROXY_ENV_PATH ?? resolve('.env') });
+const _adminHandler = createAdminHandler({ configStore: _adminConfigStore, runtimeStore: _adminRuntimeStore });
 
 type UpstreamAttempt = {
   endpoint: UpstreamEndpoint;
@@ -2409,6 +2417,12 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    const _adminHandled = await _adminHandler(req, res);
+    if (_adminHandled) {
+      finish(200, 'admin config api handled');
+      return;
+    }
+
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
         'access-control-allow-origin': '*',
@@ -2572,7 +2586,7 @@ const server = createServer(async (req, res) => {
       sendJson(
         res,
         404,
-        makeError('Supported routes: GET /healthz, GET /admin/stats, GET /v1/models, GET /v1/responses/:id, POST /admin/cache/clear, POST /v1/responses', 404).body,
+        makeError('Supported routes: GET /healthz, GET /admin/config, POST /admin/config/validate, PUT /admin/config, POST /admin/config/reload, POST /admin/config/rollback, GET /admin/stats, GET /v1/models, GET /v1/responses/:id, POST /admin/cache/clear, POST /v1/responses', 404).body,
       );
       finish(404, 'unsupported route', { method: req.method, url: req.url });
       return;
