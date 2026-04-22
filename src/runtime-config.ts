@@ -74,8 +74,10 @@ function loadAndMergeEnv(envPath: string): NodeJS.ProcessEnv {
   try {
     const raw = readFileSync(envPath, 'utf8');
     fileEnv = dotenvParse(raw);
-  } catch {
-    // file may not exist yet; proceed with empty
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      throw err;
+    }
   }
 
   const merged: NodeJS.ProcessEnv = { ...process.env };

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -16,8 +16,16 @@ function makeTempDir() {
   return dir;
 }
 
-function writeDotEnv(dir: string, content: string) {
-  writeFileSync(path.join(dir, '.env'), content, 'utf8');
+function writeDotEnv(dir: string, lines: string[]) {
+  const envPath = path.join(dir, '.env');
+  const fallbackPath = path.join(dir, 'fallback.json');
+  const modelMapPath = path.join(dir, 'model-map.json');
+  const full = [
+    ...lines,
+    `FALLBACK_CONFIG_PATH=${fallbackPath}`,
+    `MODEL_MAP_PATH=${modelMapPath}`,
+  ].join('\n');
+  writeFileSync(envPath, full, 'utf8');
 }
 
 function writeFallbackJson(dir: string, content: unknown) {
@@ -33,6 +41,8 @@ function main() {
     // === 1. Initial runtimeVersion 1 and default model from env file ===
     console.log('=== 1. Initial runtimeVersion 1 and default model ===');
     const dir1 = makeTempDir();
+    writeFallbackJson(dir1, { fallback_api_config: [] });
+    writeModelMapJson(dir1, { model_mappings: {} });
     writeDotEnv(dir1, [
       'PRIMARY_PROVIDER_NAME=test-primary',
       'PRIMARY_PROVIDER_BASE_URL=https://api.test.example',
@@ -40,9 +50,7 @@ function main() {
       'PRIMARY_PROVIDER_DEFAULT_MODEL=gpt-4o-test',
       'PORT=8080',
       'HOST=0.0.0.0',
-    ].join('\n'));
-    writeFallbackJson(dir1, { fallback_api_config: [] });
-    writeModelMapJson(dir1, { model_mappings: {} });
+    ]);
 
     const store1 = createRuntimeConfigStore({ envPath: path.join(dir1, '.env') });
     const snap1 = store1.getSnapshot();
@@ -52,6 +60,8 @@ function main() {
     assert.equal(snap1.config.port, 8080, 'port from env');
     assert.equal(snap1.envPath, path.join(dir1, '.env'), 'envPath in snapshot');
     assert.deepEqual(snap1.restartRequiredFields, [], 'no restart required on initial load');
+    assert.deepEqual(snap1.config.fallbackEndpoints, [], 'no fallback endpoints initially');
+    assert.deepEqual(snap1.config.modelMappings, {}, 'no model mappings initially');
 
     // === 2. Successful reload increments version and changes config values ===
     console.log('=== 2. Successful reload increments version ===');
@@ -62,7 +72,7 @@ function main() {
       'PRIMARY_PROVIDER_DEFAULT_MODEL=gpt-4o-updated',
       'PORT=8080',
       'HOST=0.0.0.0',
-    ].join('\n'));
+    ]);
 
     const result2 = store1.reloadFromFiles();
     assert.equal(result2.ok, true, 'reload should succeed');
@@ -78,7 +88,7 @@ function main() {
       'PRIMARY_PROVIDER_API_KEY=test-key-123',
       'PORT=9090',
       'HOST=0.0.0.0',
-    ].join('\n'));
+    ]);
 
     const result3 = store1.reloadFromFiles();
     assert.equal(result3.ok, true, 'reload with port change should succeed');
@@ -93,7 +103,7 @@ function main() {
       'PRIMARY_PROVIDER_API_KEY=test-key-123',
       'PORT=9090',
       'HOST=127.0.0.1',
-    ].join('\n'));
+    ]);
 
     const result3b = store1.reloadFromFiles();
     assert.equal(result3b.ok, true);
@@ -105,7 +115,7 @@ function main() {
     writeDotEnv(dir1, [
       'PRIMARY_PROVIDER_NAME=test-primary',
       'PRIMARY_PROVIDER_BASE_URL=https://api.test.example',
-    ].join('\n'));
+    ]);
 
     const result4 = store1.reloadFromFiles();
     assert.equal(result4.ok, false, 'reload without API key should fail');
@@ -126,9 +136,65 @@ function main() {
     const key3 = createEndpointStateKey({ name: 'primary', url: 'https://other.example/v1/responses' });
     assert.notEqual(key1, key3, 'different url produces different key');
 
+    // === 6. Fallback endpoints and model mappings loaded from files ===
+    console.log('=== 6. Fallback + model-map loaded from temp files ===');
+    const dir6 = makeTempDir();
+    writeFallbackJson(dir6, {
+      fallback_api_config: [
+        { name: 'fb-alpha', base_url: 'https://fb-alpha.example', api_key: 'fb-alpha-key' },
+      ],
+    });
+    writeModelMapJson(dir6, {
+      model_mappings: {
+        'alias-a': 'real-model-a',
+        'alias-b': 'real-model-b',
+      },
+    });
+    writeDotEnv(dir6, [
+      'PRIMARY_PROVIDER_NAME=test-primary',
+      'PRIMARY_PROVIDER_BASE_URL=https://api.test.example',
+      'PRIMARY_PROVIDER_API_KEY=test-key-123',
+      'PRIMARY_PROVIDER_DEFAULT_MODEL=gpt-4o-test',
+    ]);
+
+    const store6 = createRuntimeConfigStore({ envPath: path.join(dir6, '.env') });
+    const snap6 = store6.getSnapshot();
+
+    assert.equal(snap6.config.fallbackEndpoints.length, 1, 'one fallback endpoint loaded');
+    assert.equal(snap6.config.fallbackEndpoints[0].name, 'fb-alpha', 'fallback endpoint name');
+    assert.equal(snap6.config.fallbackEndpoints[0].url, 'https://fb-alpha.example/v1/responses', 'fallback endpoint url');
+    assert.equal(snap6.config.modelMappings['alias-a'], 'real-model-a', 'model mapping alias-a');
+    assert.equal(snap6.config.modelMappings['alias-b'], 'real-model-b', 'model mapping alias-b');
+
+    // === 7. Unreadable env file causes reload to fail ===
+    console.log('=== 7. Unreadable env file fails reload ===');
+    const dir7 = makeTempDir();
+    writeFallbackJson(dir7, { fallback_api_config: [] });
+    writeModelMapJson(dir7, { model_mappings: {} });
+    writeDotEnv(dir7, [
+      'PRIMARY_PROVIDER_NAME=test-primary',
+      'PRIMARY_PROVIDER_BASE_URL=https://api.test.example',
+      'PRIMARY_PROVIDER_API_KEY=test-key-123',
+      'PORT=8080',
+      'HOST=0.0.0.0',
+    ]);
+
+    const store7 = createRuntimeConfigStore({ envPath: path.join(dir7, '.env') });
+    assert.equal(store7.getSnapshot().runtimeVersion, 1, 'initial version');
+
+    chmodSync(path.join(dir7, '.env'), 0o000);
+    const result7 = store7.reloadFromFiles();
+    assert.equal(result7.ok, false, 'reload should fail on unreadable env file');
+    if (!result7.ok) {
+      assert.ok(result7.error.length > 0, 'error message present');
+    }
+    assert.equal(store7.getSnapshot().runtimeVersion, 1, 'version preserved after read failure');
+    chmodSync(path.join(dir7, '.env'), 0o644);
+
     console.log('\nAll runtime-reload checks passed.');
   } finally {
     for (const d of allTempDirs) {
+      try { chmodSync(path.join(d, '.env'), 0o644); } catch {}
       rmSync(d, { recursive: true, force: true });
     }
   }
