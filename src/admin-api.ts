@@ -3,9 +3,10 @@ import { existsSync, renameSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
-  createConfigFileStore,
+  createConfigFileStoreFromPaths,
   readForAdmin,
   applyAdminDraft,
+  validateDraft,
   type AdminConfigDraft,
   type ConfigFileStore,
 } from './config-files.js';
@@ -104,16 +105,12 @@ export function createAdminHandler(options: AdminHandlerOptions) {
         sendJson(res, 400, { ok: false, error: { message: 'Invalid JSON body', type: 'invalid_request_error' } });
         return true;
       }
-      try {
-        const draft = body as AdminConfigDraft;
+      const validation = validateDraft(body);
+      if (!validation.ok) {
+        sendJson(res, 200, { ok: true, valid: false, errors: validation.errors });
+      } else {
         const config = readForAdmin(configStore);
-        sendJson(res, 200, { ok: true, valid: true, config });
-      } catch (err) {
-        sendJson(res, 200, {
-          ok: true,
-          valid: false,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        sendJson(res, 200, { ok: true, valid: true, warnings: validation.warnings, config });
       }
       return true;
     }

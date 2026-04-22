@@ -71,6 +71,20 @@ export function createConfigFileStore(dir: string): ConfigFileStore {
   };
 }
 
+export function createConfigFileStoreFromPaths(options: {
+  envPath: string;
+  fallbackPath: string;
+  modelMapPath: string;
+}): ConfigFileStore {
+  const envResolved = resolve(options.envPath);
+  return {
+    dir: resolve(envResolved, '..'),
+    envPath: envResolved,
+    fallbackPath: resolve(options.fallbackPath),
+    modelMapPath: resolve(options.modelMapPath),
+  };
+}
+
 function parseDotEnvFile(filePath: string): Record<string, string> {
   if (!existsSync(filePath)) return {};
   const raw = readFileSync(filePath, 'utf8');
@@ -235,4 +249,73 @@ export function applyAdminDraft(store: ConfigFileStore, draft: AdminConfigDraft)
     store.modelMapPath,
     JSON.stringify({ model_mappings: draft.modelMappings }, null, 2) + '\n',
   );
+}
+
+export function validateDraft(draft: unknown): { ok: true; warnings: string[] } | { ok: false; errors: string[] } {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+
+  if (typeof draft !== 'object' || draft === null) {
+    return { ok: false, errors: ['draft must be a JSON object'] };
+  }
+
+  const d = draft as Record<string, unknown>;
+
+  if (!Array.isArray(d.env)) {
+    errors.push('draft.env must be an array');
+  } else {
+    for (let i = 0; i < d.env.length; i++) {
+      const entry = d.env[i];
+      if (typeof entry !== 'object' || entry === null) {
+        errors.push(`draft.env[${i}] must be an object`);
+        continue;
+      }
+      const e = entry as Record<string, unknown>;
+      if (typeof e.key !== 'string' || e.key.trim().length === 0) {
+        errors.push(`draft.env[${i}].key must be a non-empty string`);
+      }
+      if (e.secretAction !== undefined && !['keep', 'replace', 'clear'].includes(String(e.secretAction))) {
+        errors.push(`draft.env[${i}].secretAction must be 'keep', 'replace', or 'clear'`);
+      }
+    }
+  }
+
+  if (!Array.isArray(d.fallbackProviders)) {
+    errors.push('draft.fallbackProviders must be an array');
+  } else {
+    for (let i = 0; i < d.fallbackProviders.length; i++) {
+      const prov = d.fallbackProviders[i];
+      if (typeof prov !== 'object' || prov === null) {
+        errors.push(`draft.fallbackProviders[${i}] must be an object`);
+        continue;
+      }
+      const p = prov as Record<string, unknown>;
+      if (typeof p.name !== 'string' || p.name.trim().length === 0) {
+        errors.push(`draft.fallbackProviders[${i}].name must be a non-empty string`);
+      }
+      if (typeof p.baseUrl !== 'string' || p.baseUrl.trim().length === 0) {
+        errors.push(`draft.fallbackProviders[${i}].baseUrl must be a non-empty string`);
+      }
+      if (p.apiKeyMode !== undefined && !['env', 'inline', 'none'].includes(String(p.apiKeyMode))) {
+        errors.push(`draft.fallbackProviders[${i}].apiKeyMode must be 'env', 'inline', or 'none'`);
+      }
+    }
+  }
+
+  if (typeof d.modelMappings !== 'object' || d.modelMappings === null || Array.isArray(d.modelMappings)) {
+    errors.push('draft.modelMappings must be a JSON object');
+  } else {
+    const mm = d.modelMappings as Record<string, unknown>;
+    for (const [alias, target] of Object.entries(mm)) {
+      if (typeof target !== 'string') {
+        errors.push(`draft.modelMappings['${alias}'] must be a string`);
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  return { ok: true, warnings };
 }

@@ -28,7 +28,7 @@ import {
   writeBufferedResponsesSse,
 } from './responses-sse.js';
 import { createAdminHandler } from './admin-api.js';
-import { createConfigFileStore } from './config-files.js';
+import { createConfigFileStoreFromPaths } from './config-files.js';
 import { createRuntimeConfigStore } from './runtime-config.js';
 
 const config = createProxyRuntimeConfig();
@@ -83,8 +83,18 @@ const {
   upstreamUrl,
 } = config;
 
-const _adminConfigStore = createConfigFileStore(process.env.PROXY_ENV_PATH ?? resolve('.env'));
-const _adminRuntimeStore = createRuntimeConfigStore({ envPath: process.env.PROXY_ENV_PATH ?? resolve('.env') });
+// Admin config store: use explicit paths from the initial runtime snapshot so that
+// instance-specific FALLBACK_CONFIG_PATH / MODEL_MAP_PATH are respected rather than
+// deriving them from the .env directory. Admin reload only updates this admin runtime
+// store; main proxy request handling remains on the static config until Task 5.
+const _adminEnvPath = process.env.PROXY_ENV_PATH ?? resolve('.env');
+const _adminRuntimeStore = createRuntimeConfigStore({ envPath: _adminEnvPath });
+const _adminInitSnap = _adminRuntimeStore.getSnapshot();
+const _adminConfigStore = createConfigFileStoreFromPaths({
+  envPath: _adminEnvPath,
+  fallbackPath: _adminInitSnap.config.fallbackConfigPath,
+  modelMapPath: _adminInitSnap.config.modelMappingPath,
+});
 const _adminHandler = createAdminHandler({ configStore: _adminConfigStore, runtimeStore: _adminRuntimeStore });
 
 type UpstreamAttempt = {

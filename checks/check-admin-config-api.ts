@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import os from 'node:os';
 import path from 'node:path';
 
-import { createConfigFileStore } from '../src/config-files.js';
+import { createConfigFileStoreFromPaths } from '../src/config-files.js';
 import { createRuntimeConfigStore } from '../src/runtime-config.js';
 import { createAdminHandler, isLocalhost } from '../src/admin-api.js';
 
@@ -17,23 +17,17 @@ function makeTempDir() {
   return dir;
 }
 
-function writeDotEnv(dir: string, lines: string[]) {
-  const fallbackPath = path.join(dir, 'fallback.json');
-  const modelMapPath = path.join(dir, 'model-map.json');
-  const full = [
-    ...lines,
-    `FALLBACK_CONFIG_PATH=${fallbackPath}`,
-    `MODEL_MAP_PATH=${modelMapPath}`,
-  ].join('\n');
-  writeFileSync(path.join(dir, '.env'), full, 'utf8');
+function writeDotEnv(envPath: string, lines: string[]) {
+  const full = lines.join('\n');
+  writeFileSync(envPath, full, 'utf8');
 }
 
-function writeFallbackJson(dir: string, content: unknown) {
-  writeFileSync(path.join(dir, 'fallback.json'), JSON.stringify(content, null, 2), 'utf8');
+function writeFallbackJson(filePath: string, content: unknown) {
+  writeFileSync(filePath, JSON.stringify(content, null, 2), 'utf8');
 }
 
-function writeModelMapJson(dir: string, content: unknown) {
-  writeFileSync(path.join(dir, 'model-map.json'), JSON.stringify(content, null, 2), 'utf8');
+function writeModelMapJson(filePath: string, content: unknown) {
+  writeFileSync(filePath, JSON.stringify(content, null, 2), 'utf8');
 }
 
 function startServer(
@@ -69,26 +63,46 @@ async function main() {
     assert.equal(isLocalhost(undefined), false);
     assert.equal(isLocalhost('10.0.0.1'), false);
 
-    console.log('=== 2. Setup temp config ===');
-    const dir = makeTempDir();
-    writeFallbackJson(dir, { fallback_api_config: [] });
-    writeModelMapJson(dir, { model_mappings: {} });
-    writeDotEnv(dir, [
+    // Use two separate dirs: envDir has .env, configDir has fallback.json + model-map.json.
+    // This proves the store uses explicit paths from runtime snapshot, not guessed from .env dir.
+    console.log('=== 2. Setup with separated env and config dirs ===');
+    const envDir = makeTempDir();
+    const configDir = makeTempDir();
+
+    const envPath = path.join(envDir, '.env');
+    const fallbackPath = path.join(configDir, 'fallback.json');
+    const modelMapPath = path.join(configDir, 'model-map.json');
+
+    writeFallbackJson(fallbackPath, { fallback_api_config: [] });
+    writeModelMapJson(modelMapPath, { model_mappings: {} });
+    writeDotEnv(envPath, [
       'PRIMARY_PROVIDER_NAME=test-primary',
       'PRIMARY_PROVIDER_BASE_URL=https://api.test.example',
       'PRIMARY_PROVIDER_API_KEY=test-key-123',
       'PRIMARY_PROVIDER_DEFAULT_MODEL=gpt-4o-test',
       'PORT=0',
       'HOST=127.0.0.1',
+      `FALLBACK_CONFIG_PATH=${fallbackPath}`,
+      `MODEL_MAP_PATH=${modelMapPath}`,
     ]);
 
-    const configStore = createConfigFileStore(dir);
-    const runtimeStore = createRuntimeConfigStore({ envPath: path.join(dir, '.env') });
+    const runtimeStore = createRuntimeConfigStore({ envPath });
+    const snap = runtimeStore.getSnapshot();
+    assert.equal(snap.config.fallbackConfigPath, fallbackPath, 'runtime snapshot should have correct fallback path');
+    assert.equal(snap.config.modelMappingPath, modelMapPath, 'runtime snapshot should have correct model-map path');
+
+    // Use explicit paths from snapshot — same pattern as json-proxy.ts
+    const configStore = createConfigFileStoreFromPaths({
+      envPath,
+      fallbackPath: snap.config.fallbackConfigPath,
+      modelMapPath: snap.config.modelMappingPath,
+    });
     const adminHandler = createAdminHandler({ configStore, runtimeStore });
     const { port } = await startServer(adminHandler);
     const baseUrl = `http://127.0.0.1:${port}`;
 
     console.log(`Test server started on port ${port}`);
+    console.log(`envDir=${envDir}, configDir=${configDir}`);
 
     console.log('=== 3. GET /admin/config returns 200 with masked secrets ===');
     const getConfigRes = await fetch(`${baseUrl}/admin/config`);
@@ -105,25 +119,43 @@ async function main() {
     assert.equal(typeof getConfigBody.runtimeVersion, 'number', 'should have runtimeVersion');
     assert.ok(Array.isArray(getConfigBody.restartRequiredFields), 'should have restartRequiredFields');
 
-    console.log('=== 4. POST /admin/config/validate returns 200 without writing files ===');
-    const envBeforeValidate = readFileSync(path.join(dir, '.env'), 'utf8');
+    console.log('=== 4. POST /admin/config/validate validates draft without writing files ===');
+    const envBeforeValidate = readFileSync(envPath, 'utf8');
+    const fbBeforeValidate = readFileSync(fallbackPath, 'utf8');
     const validateRes = await fetch(`${baseUrl}/admin/config/validate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         env: [{ key: 'SOME_KEY', value: 'new-value' }],
-        fallbackProviders: [],
+        fallbackProviders: [{ name: 'fb-1', baseUrl: 'https://fb.example', apiKeyMode: 'none' }],
         modelMappings: { 'test-alias': 'test-model' },
       }),
     });
     assert.equal(validateRes.status, 200);
     const validateBody = (await validateRes.json()) as Record<string, unknown>;
     assert.equal(validateBody.ok, true);
+    assert.equal(validateBody.valid, true, 'valid draft should return valid:true');
 
-    const envAfterValidate = readFileSync(path.join(dir, '.env'), 'utf8');
-    assert.equal(envBeforeValidate, envAfterValidate, 'validate must not modify files');
+    assert.equal(readFileSync(envPath, 'utf8'), envBeforeValidate, 'validate must not modify .env');
+    assert.equal(readFileSync(fallbackPath, 'utf8'), fbBeforeValidate, 'validate must not modify fallback.json');
 
-    console.log('=== 5. PUT /admin/config writes and reloads runtimeVersion ===');
+    // Validate with bad draft
+    const badValidateRes = await fetch(`${baseUrl}/admin/config/validate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        env: 'not-an-array',
+        fallbackProviders: [{ baseUrl: '' }],
+        modelMappings: 'wrong',
+      }),
+    });
+    assert.equal(badValidateRes.status, 200);
+    const badValidateBody = (await badValidateRes.json()) as Record<string, unknown>;
+    assert.equal(badValidateBody.valid, false, 'invalid draft should return valid:false');
+    assert.ok(Array.isArray(badValidateBody.errors), 'invalid draft should list errors');
+    assert.ok((badValidateBody.errors as string[]).length > 0, 'should have at least one error');
+
+    console.log('=== 5. PUT /admin/config writes to correct (separated) paths and reloads ===');
     const putRes = await fetch(`${baseUrl}/admin/config`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
@@ -141,8 +173,24 @@ async function main() {
       'runtimeVersion should be incremented after save+reload',
     );
 
-    const modelMapAfter = JSON.parse(readFileSync(path.join(dir, 'model-map.json'), 'utf8'));
-    assert.deepEqual(modelMapAfter.model_mappings, { 'new-alias': 'new-target' });
+    // Verify write went to configDir, NOT envDir
+    const modelMapInConfigDir = JSON.parse(readFileSync(modelMapPath, 'utf8'));
+    assert.deepEqual(
+      modelMapInConfigDir.model_mappings,
+      { 'new-alias': 'new-target' },
+      'model-map.json in configDir should have new mappings',
+    );
+
+    // Verify no spillover into envDir
+    const { existsSync } = await import('node:fs');
+    assert.ok(
+      !existsSync(path.join(envDir, 'model-map.json')),
+      'no model-map.json should exist in envDir',
+    );
+    assert.ok(
+      !existsSync(path.join(envDir, 'fallback.json')),
+      'no fallback.json should exist in envDir',
+    );
 
     console.log('=== 6. POST /admin/config/reload returns 200 ===');
     const reloadRes = await fetch(`${baseUrl}/admin/config/reload`, {
@@ -166,9 +214,7 @@ async function main() {
     assert.ok(Array.isArray(restored));
     assert.ok(restored.length > 0, 'should have restored some files');
 
-    const modelMapAfterRollback = JSON.parse(
-      readFileSync(path.join(dir, 'model-map.json'), 'utf8'),
-    );
+    const modelMapAfterRollback = JSON.parse(readFileSync(modelMapPath, 'utf8'));
     assert.deepEqual(
       modelMapAfterRollback.model_mappings,
       {},
@@ -180,12 +226,12 @@ async function main() {
     assert.equal(unknownRes.status, 404);
 
     console.log('=== 9. Invalid JSON body on validate returns 400 ===');
-    const badValidateRes = await fetch(`${baseUrl}/admin/config/validate`, {
+    const badJsonRes = await fetch(`${baseUrl}/admin/config/validate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: 'not-json{',
     });
-    assert.equal(badValidateRes.status, 400);
+    assert.equal(badJsonRes.status, 400);
 
     console.log('\nAll admin-config-api checks passed.');
   } finally {
