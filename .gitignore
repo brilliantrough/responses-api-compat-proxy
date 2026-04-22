@@ -6,4 +6,5 @@ logs/
 captures/
 sse-failures/
 .superpowers/
+.worktrees/
 instances/proxy-*/
