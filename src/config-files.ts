@@ -277,6 +277,9 @@ export function validateDraft(draft: unknown): { ok: true; warnings: string[] } 
       if (e.secretAction !== undefined && !['keep', 'replace', 'clear'].includes(String(e.secretAction))) {
         errors.push(`draft.env[${i}].secretAction must be 'keep', 'replace', or 'clear'`);
       }
+      if (!e.secretAction && typeof e.value !== 'string') {
+        errors.push(`draft.env[${i}].value must be a string for non-secret entries`);
+      }
     }
   }
 

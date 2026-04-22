@@ -47,6 +47,9 @@ function getRemoteAddress(req: IncomingMessage): string | undefined {
 export type AdminHandlerOptions = {
   configStore: ConfigFileStore;
   runtimeStore: RuntimeConfigStore;
+  getAdminStats?: () => unknown;
+  clearResponseCache?: () => number;
+  responseCacheSize?: () => number;
 };
 
 function rollbackBakFiles(store: ConfigFileStore): string[] {
@@ -83,6 +86,15 @@ function serveAdminStatic(res: ServerResponse, filename: string, contentType: st
   }
 }
 
+function currentConfigStore(baseStore: ConfigFileStore, runtimeStore: RuntimeConfigStore): ConfigFileStore {
+  const snapshot = runtimeStore.getSnapshot();
+  return createConfigFileStoreFromPaths({
+    envPath: baseStore.envPath,
+    fallbackPath: snapshot.config.fallbackConfigPath,
+    modelMapPath: snapshot.config.modelMappingPath,
+  });
+}
+
 export function createAdminHandler(options: AdminHandlerOptions) {
   const { configStore, runtimeStore } = options;
 
@@ -101,9 +113,11 @@ export function createAdminHandler(options: AdminHandlerOptions) {
       return true;
     }
 
+    const store = currentConfigStore(configStore, runtimeStore);
+
     if (method === 'GET' && url === '/admin/config') {
       try {
-        const config = readForAdmin(configStore);
+        const config = readForAdmin(store);
         const snapshot = runtimeStore.getSnapshot();
         sendJson(res, 200, {
           ok: true,
@@ -132,7 +146,7 @@ export function createAdminHandler(options: AdminHandlerOptions) {
       if (!validation.ok) {
         sendJson(res, 200, { ok: true, valid: false, errors: validation.errors });
       } else {
-        const config = readForAdmin(configStore);
+        const config = readForAdmin(store);
         sendJson(res, 200, { ok: true, valid: true, warnings: validation.warnings, config });
       }
       return true;
@@ -146,9 +160,18 @@ export function createAdminHandler(options: AdminHandlerOptions) {
         sendJson(res, 400, { ok: false, error: { message: 'Invalid JSON body', type: 'invalid_request_error' } });
         return true;
       }
+      const validation = validateDraft(body);
+      if (!validation.ok) {
+        sendJson(res, 400, {
+          ok: false,
+          error: { message: 'Validation failed', type: 'invalid_request_error' },
+          errors: validation.errors,
+        });
+        return true;
+      }
       try {
         const draft = body as AdminConfigDraft;
-        applyAdminDraft(configStore, draft);
+        applyAdminDraft(store, draft);
         const reloadResult = runtimeStore.reloadFromFiles();
         if (!reloadResult.ok) {
           sendJson(res, 500, {
@@ -199,7 +222,7 @@ export function createAdminHandler(options: AdminHandlerOptions) {
 
     if (method === 'POST' && url === '/admin/config/rollback') {
       try {
-        const restored = rollbackBakFiles(configStore);
+        const restored = rollbackBakFiles(store);
         if (restored.length === 0) {
           sendJson(res, 200, { ok: true, restored: [], message: 'No backup files found' });
           return true;
@@ -225,6 +248,29 @@ export function createAdminHandler(options: AdminHandlerOptions) {
           ok: false,
           error: { message: err instanceof Error ? err.message : String(err), type: 'server_error' },
         });
+      }
+      return true;
+    }
+
+    if (method === 'GET' && url === '/admin/stats') {
+      if (options.getAdminStats) {
+        sendJson(res, 200, options.getAdminStats());
+      } else {
+        sendJson(res, 200, { ok: true });
+      }
+      return true;
+    }
+
+    if (method === 'POST' && url === '/admin/cache/clear') {
+      if (options.clearResponseCache) {
+        const clearedResponses = options.clearResponseCache();
+        sendJson(res, 200, {
+          ok: true,
+          clearedResponses,
+          cachedResponses: options.responseCacheSize ? options.responseCacheSize() : 0,
+        });
+      } else {
+        sendJson(res, 200, { ok: true });
       }
       return true;
     }

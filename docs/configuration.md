@@ -85,6 +85,17 @@ Environment keys containing `KEY`, `TOKEN`, or `SECRET` (case-insensitive) are t
 - **Edit**: In the admin UI, secret fields are displayed as masked password inputs. To change a secret, type the new value. To keep the existing secret, leave the field empty — the `secretAction: "keep"` default preserves the original value.
 - **Save**: The `PUT /admin/config` endpoint supports three secret actions: `keep` (preserve existing), `replace` (set new value), or `clear` (remove). If no action is specified for a secret field, `keep` is assumed.
 
+### .env Formatting Limitations
+
+When the admin API writes the `.env` file, it normalizes formatting:
+
+- **Comments, quotes, and multiline values are not preserved.** The admin API serializes `.env` as simple `KEY=VALUE` lines. Any inline comments, quoted values, or multiline formatting in the original file will be lost on save.
+- **Process-level environment variables are not removed.** Clearing a key via admin only removes it from the `.env` file. The corresponding `process.env` variable inherited at process startup remains in memory until the process restarts. For security-sensitive clearing, restart the proxy process after saving.
+
+### Runtime Path Resolution
+
+Admin config paths for fallback JSON and model-map JSON are derived from the current runtime snapshot on each request, not frozen at startup. After a reload that changes `FALLBACK_CONFIG_PATH` or `MODEL_MAP_PATH`, subsequent admin reads and writes use the new paths. Changing `PROXY_ENV_PATH` itself still requires a process restart since it is read only at startup.
+
 ## Runtime Reference
 
 Common settings and code defaults:

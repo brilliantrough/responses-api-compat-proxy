@@ -302,6 +302,46 @@ async function main() {
     const cacheCtrl = cacheCtrlRes.headers.get('cache-control') ?? '';
     assert.ok(cacheCtrl.includes('no-store'), `expected no-store in cache-control, got: ${cacheCtrl}`);
 
+    console.log('=== 17. Invalid PUT /admin/config returns 400 and has no side effects ===');
+    {
+      const envBefore = readFileSync(envPath, 'utf8');
+      const fbBefore = readFileSync(fallbackPath, 'utf8');
+      const mmBefore = readFileSync(modelMapPath, 'utf8');
+      const invalidPutRes = await fetch(`${baseUrl}/admin/config`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          env: 'not-an-array',
+          fallbackProviders: [{ baseUrl: '' }],
+          modelMappings: 'wrong',
+        }),
+      });
+      assert.equal(invalidPutRes.status, 400, 'invalid PUT should return 400');
+      const invalidPutBody = (await invalidPutRes.json()) as Record<string, unknown>;
+      assert.equal(invalidPutBody.ok, false);
+      assert.ok(Array.isArray(invalidPutBody.errors), 'invalid PUT should have errors array');
+      assert.ok((invalidPutBody.errors as string[]).length > 0, 'should have validation errors');
+      assert.equal(readFileSync(envPath, 'utf8'), envBefore, 'env file must not change on invalid PUT');
+      assert.equal(readFileSync(fallbackPath, 'utf8'), fbBefore, 'fallback file must not change on invalid PUT');
+      assert.equal(readFileSync(modelMapPath, 'utf8'), mmBefore, 'model-map file must not change on invalid PUT');
+    }
+
+    console.log('=== 18. GET /admin/stats is localhost-only and returns 200 ===');
+    {
+      const statsRes = await fetch(`${baseUrl}/admin/stats`);
+      assert.equal(statsRes.status, 200, '/admin/stats should return 200 for localhost');
+      const statsBody = await statsRes.json();
+      assert.ok(typeof statsBody === 'object', 'stats should return JSON');
+    }
+
+    console.log('=== 19. POST /admin/cache/clear is localhost-only and returns 200 ===');
+    {
+      const clearRes = await fetch(`${baseUrl}/admin/cache/clear`, { method: 'POST' });
+      assert.equal(clearRes.status, 200, '/admin/cache/clear should return 200 for localhost');
+      const clearBody = (await clearRes.json()) as Record<string, unknown>;
+      assert.equal(clearBody.ok, true);
+    }
+
     console.log('\nAll admin-config-api checks passed.');
   } finally {
     for (const server of allServers) {

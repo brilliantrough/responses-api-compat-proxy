@@ -40,7 +40,13 @@ const _adminConfigStore = createConfigFileStoreFromPaths({
   fallbackPath: runtimeStore.getSnapshot().config.fallbackConfigPath,
   modelMapPath: runtimeStore.getSnapshot().config.modelMappingPath,
 });
-const _adminHandler = createAdminHandler({ configStore: _adminConfigStore, runtimeStore });
+const _adminHandler = createAdminHandler({
+  configStore: _adminConfigStore,
+  runtimeStore,
+  getAdminStats: () => getAdminStats(),
+  clearResponseCache: () => clearResponseCache(),
+  responseCacheSize: () => responseCache.size,
+});
 
 const _initialSnapshot = runtimeStore.getSnapshot();
 const _requestContext = new AsyncLocalStorage<RuntimeSnapshot>();
@@ -2488,22 +2494,7 @@ const server = createServer((req, res) => {
       return;
     }
 
-    if (req.method === 'GET' && req.url === '/admin/stats') {
-      sendJson(res, 200, getAdminStats());
-      finish(200, 'admin stats returned');
-      return;
-    }
 
-    if (req.method === 'POST' && req.url === '/admin/cache/clear') {
-      const clearedResponses = clearResponseCache();
-      sendJson(res, 200, {
-        ok: true,
-        clearedResponses,
-        cachedResponses: responseCache.size,
-      });
-      finish(200, 'admin cache cleared', { clearedResponses });
-      return;
-    }
 
     if (req.method === 'GET' && req.url.startsWith('/v1/responses/')) {
       const responseId = req.url.slice('/v1/responses/'.length);
