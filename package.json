@@ -21,7 +21,8 @@
     "proxy": "tsx src/json-proxy.ts",
     "proxy:dev": "tsx src/json-proxy.ts",
     "proxy:start": "node dist/json-proxy.js",
-    "loadtest": "tsx tools/load-test-proxy.ts"
+    "loadtest": "tsx tools/load-test-proxy.ts",
+    "check:config-files": "tsx checks/check-config-files.ts"
   },
   "dependencies": {
     "@ai-sdk/open-responses": "^1.0.6",
