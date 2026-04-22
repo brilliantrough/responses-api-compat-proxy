@@ -1,5 +1,7 @@
 # Responses API Compatibility Proxy
 
+[English](./README.md) | [中文](./docs/zh/README.md)
+
 A TypeScript proxy for exploring and operating against upstream providers that expose OpenAI-style `/v1/responses` and `/v1/models` endpoints.
 
 This project focuses on request compatibility, JSON and SSE response handling, fallback routing, stream normalization, runtime admin tooling, and prompt cache hint passthrough. It is not an official OpenAI project.
