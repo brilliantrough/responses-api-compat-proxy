@@ -6,9 +6,12 @@ import path from 'node:path';
 import { createConfigFileStore, readForAdmin, applyAdminDraft } from '../src/config-files.js';
 
 const MASKED = '***';
+const allTempDirs: string[] = [];
 
 function makeTempDir() {
-  return mkdtempSync(path.join(os.tmpdir(), 'responses-config-files-'));
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'responses-config-files-'));
+  allTempDirs.push(dir);
+  return dir;
 }
 
 function writeDotEnv(dir: string, content: string) {
@@ -36,9 +39,9 @@ function readModelMapJson(dir: string) {
 }
 
 function main() {
-  const dir = makeTempDir();
-
   try {
+    const dir = makeTempDir();
+
     writeDotEnv(dir, [
       'PRIMARY_PROVIDER_NAME=my-primary',
       'PRIMARY_PROVIDER_BASE_URL=https://primary.example',
@@ -69,7 +72,7 @@ function main() {
     assert.ok(primaryEntry, 'PRIMARY_PROVIDER_API_KEY should appear in env');
     assert.equal(primaryEntry.value, MASKED, 'primary api key must be masked');
     assert.equal(primaryEntry.secret, true, 'should be flagged secret');
-    assert.ok(!readDotEnv(dir).includes('primary-secret') || true, 'raw file still has real value');
+    assert.ok(readDotEnv(dir).includes('primary-secret'), 'raw .env still contains the real secret value');
 
     console.log('=== 2. FALLBACK_ALPHA_API_KEY can be replaced ===');
     const alphaEnvBefore = admin.env.find(e => e.key === 'FALLBACK_ALPHA_API_KEY');
@@ -234,7 +237,9 @@ function main() {
 
     console.log('\nAll config-files checks passed.');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    for (const d of allTempDirs) {
+      rmSync(d, { recursive: true, force: true });
+    }
   }
 }
 
