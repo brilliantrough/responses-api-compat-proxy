@@ -233,6 +233,48 @@ async function main() {
     });
     assert.equal(badJsonRes.status, 400);
 
+
+    console.log('=== 10. GET /admin returns HTML with "Admin Config" ===');
+    const adminHtmlRes = await fetch(`${baseUrl}/admin`);
+    assert.equal(adminHtmlRes.status, 200);
+    const adminHtmlContentType = adminHtmlRes.headers.get('content-type') ?? '';
+    assert.ok(adminHtmlContentType.includes('text/html'), `expected text/html, got ${adminHtmlContentType}`);
+    const adminHtmlBody = await adminHtmlRes.text();
+    assert.ok(adminHtmlBody.includes('Admin Config'), 'HTML should contain "Admin Config"');
+
+    console.log('=== 11. GET /admin/ returns same admin HTML ===');
+    const adminSlashRes = await fetch(`${baseUrl}/admin/`);
+    assert.equal(adminSlashRes.status, 200);
+    const adminSlashContentType = adminSlashRes.headers.get('content-type') ?? '';
+    assert.ok(adminSlashContentType.includes('text/html'), `expected text/html for /admin/, got ${adminSlashContentType}`);
+    const adminSlashBody = await adminSlashRes.text();
+    assert.ok(adminSlashBody.includes('Admin Config'), '/admin/ HTML should contain "Admin Config"');
+
+    console.log('=== 12. GET /admin/assets/admin.js returns JavaScript ===');
+    const adminJsRes = await fetch(`${baseUrl}/admin/assets/admin.js`);
+    assert.equal(adminJsRes.status, 200);
+    const jsContentType = adminJsRes.headers.get('content-type') ?? '';
+    assert.ok(
+      jsContentType.includes('javascript') || jsContentType.includes('text/javascript') || jsContentType.includes('application/javascript'),
+      `expected javascript content-type, got ${jsContentType}`,
+    );
+    const jsBody = await adminJsRes.text();
+    assert.ok(jsBody.includes('admin'), 'JS should reference admin');
+
+    console.log('=== 13. GET /admin/assets/admin.css returns CSS ===');
+    const adminCssRes = await fetch(`${baseUrl}/admin/assets/admin.css`);
+    assert.equal(adminCssRes.status, 200);
+    const cssContentType = adminCssRes.headers.get('content-type') ?? '';
+    assert.ok(cssContentType.includes('text/css'), `expected text/css, got ${cssContentType}`);
+
+    console.log('=== 14. Path traversal is blocked ===');
+    const traversalRes = await fetch(`${baseUrl}/admin/assets/../src/admin-api.ts`);
+    assert.ok(traversalRes.status === 404 || traversalRes.status === 403, `path traversal should be rejected, got ${traversalRes.status}`);
+
+    console.log('=== 15. Unknown admin asset returns 404 ===');
+    const unknownAssetRes = await fetch(`${baseUrl}/admin/assets/nonexistent.txt`);
+    assert.equal(unknownAssetRes.status, 404);
+
     console.log('\nAll admin-config-api checks passed.');
   } finally {
     for (const server of allServers) {

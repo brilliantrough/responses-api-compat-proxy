@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { existsSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
@@ -61,6 +61,27 @@ function rollbackBakFiles(store: ConfigFileStore): string[] {
   return restored;
 }
 
+function serveAdminStatic(res: ServerResponse, filename: string, contentType: string, subDir?: string) {
+  const base = resolve(import.meta.dirname, '..', 'public', 'admin');
+  const filePath = subDir ? resolve(base, subDir, filename) : resolve(base, filename);
+  const safeBase = base;
+  if (!filePath.startsWith(safeBase)) {
+    sendJson(res, 403, { error: { message: 'Forbidden', type: 'forbidden' } });
+    return;
+  }
+  if (!existsSync(filePath)) {
+    sendJson(res, 404, { error: { message: 'Not found', type: 'not_found' } });
+    return;
+  }
+  try {
+    const data = readFileSync(filePath, 'utf8');
+    res.writeHead(200, { 'content-type': contentType });
+    res.end(data);
+  } catch {
+    sendJson(res, 500, { error: { message: 'Failed to read static file', type: 'server_error' } });
+  }
+}
+
 export function createAdminHandler(options: AdminHandlerOptions) {
   const { configStore, runtimeStore } = options;
 
@@ -71,7 +92,7 @@ export function createAdminHandler(options: AdminHandlerOptions) {
     const url = req.url ?? '';
     const method = req.method ?? '';
 
-    if (!url.startsWith('/admin/')) return false;
+    if (url !== '/admin' && !url.startsWith('/admin/')) return false;
 
     if (!isLocalhost(getRemoteAddress(req))) {
       sendJson(res, 403, { error: { message: 'Admin endpoints are only accessible from localhost', type: 'forbidden' } });
@@ -203,6 +224,29 @@ export function createAdminHandler(options: AdminHandlerOptions) {
           error: { message: err instanceof Error ? err.message : String(err), type: 'server_error' },
         });
       }
+      return true;
+    }
+
+    if (method === 'GET' && (url === '/admin' || url === '/admin/')) {
+      serveAdminStatic(res, 'admin.html', 'text/html; charset=utf-8');
+      return true;
+    }
+
+    if (method === 'GET' && url.startsWith('/admin/assets/')) {
+      const assetName = url.slice('/admin/assets/'.length);
+      if (!assetName || assetName.includes('..') || assetName.includes('/') || assetName.includes('\\')) {
+        sendJson(res, 404, { error: { message: 'Not found', type: 'not_found' } });
+        return true;
+      }
+      if (assetName === 'admin.js') {
+        serveAdminStatic(res, 'admin.js', 'application/javascript; charset=utf-8', 'assets');
+        return true;
+      }
+      if (assetName === 'admin.css') {
+        serveAdminStatic(res, 'admin.css', 'text/css; charset=utf-8', 'assets');
+        return true;
+      }
+      sendJson(res, 404, { error: { message: 'Not found', type: 'not_found' } });
       return true;
     }
 

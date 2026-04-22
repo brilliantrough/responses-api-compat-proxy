@@ -1,0 +1,4 @@
+body { font-family: monospace; margin: 2rem; background: #fafafa; color: #222; }
+h1 { font-size: 1.4rem; }
+#status { margin: 1rem 0; color: #555; }
+#config-output { white-space: pre; background: #fff; border: 1px solid #ddd; padding: 1rem; overflow-x: auto; }
