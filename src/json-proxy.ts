@@ -2444,6 +2444,9 @@ const server = createServer((req, res) => {
 
     const _adminHandled = await _adminHandler(req, res);
     if (_adminHandled) {
+      if ((req.url ?? '').split(/[?#]/)[0] === '/admin/monitor/stats') {
+        return;
+      }
       finish(200, 'admin config api handled');
       return;
     }

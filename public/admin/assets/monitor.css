@@ -1,0 +1,116 @@
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  background: #08111f;
+  color: #dce7f5;
+}
+
+.monitor-shell {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.monitor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+}
+
+.monitor-header h1 {
+  margin: 0;
+}
+
+.monitor-header p {
+  color: #8ea2bf;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.card,
+.panel {
+  background: #111c31;
+  border: 1px solid #263854;
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.card-label {
+  color: #8ea2bf;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.card-value {
+  font-size: 26px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.panel {
+  margin-top: 16px;
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  border-bottom: 1px solid #263854;
+  padding: 8px;
+  text-align: left;
+}
+
+.url {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.state-ok {
+  background: #26d07c;
+}
+
+.state-warn {
+  background: #f2c94c;
+}
+
+.state-bad {
+  background: #ff5c5c;
+}
+
+.trend-bars {
+  display: flex;
+  align-items: end;
+  gap: 3px;
+  height: 56px;
+}
+
+.trend-bars span {
+  width: 6px;
+  background: #58a6ff;
+  border-radius: 3px 3px 0 0;
+}
+
+.error {
+  color: #ff8b8b;
+}

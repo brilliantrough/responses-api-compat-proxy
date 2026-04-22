@@ -1,113 +1,133 @@
 # Responses API Compatibility Proxy
 
-A TypeScript proxy for testing and normalizing OpenAI Responses API-compatible upstream providers.
+A TypeScript proxy for exploring and operating against upstream providers that expose OpenAI-style `/v1/responses` and `/v1/models` endpoints.
 
-This project is not an official OpenAI project. It is a compatibility and operations layer for providers that expose OpenAI-style `/v1/responses` and `/v1/models` endpoints, with extra handling for fallback, SSE normalization, request normalization, and runtime diagnostics.
+This project focuses on request compatibility, JSON and SSE response handling, fallback routing, stream normalization, runtime admin tooling, and prompt cache hint passthrough. It is not an official OpenAI project.
 
-## Features
+## What It Helps With
 
-- `POST /v1/responses` proxying for JSON and streaming clients.
-- `GET /v1/models` passthrough with optional model alias exposure.
-- OpenAI Responses API request normalization helpers.
-- `raw` and `normalized` SSE stream modes.
-- Fallback providers with retryable error classification.
-- Endpoint cooldown and lightweight circuit breaker behavior.
-- Prompt cache hint passthrough and default injection.
-- Lightweight admin endpoints for stats and cache clearing.
-- Local admin UI at `/admin` for inspecting and editing configuration.
-- Example multi-instance configuration layout.
+- Proxy `POST /v1/responses` for JSON and streaming clients.
+- Proxy `GET /v1/models` with optional model alias exposure.
+- Normalize OpenAI Responses-style requests before forwarding upstream.
+- Normalize SSE streams or pass them through in `raw` mode.
+- Fall back across multiple providers with cooldown and circuit-breaker behavior.
+- Inspect and edit runtime config locally through `/admin`.
+- Watch provider health and proxy activity through `/admin/monitor`.
 
 ## Quick Start
 
+Install dependencies and create a local runtime instance from the tracked example files:
+
 ```bash
 npm install
-cp instances/example-11234/.env.example .env
-npm run build
-npm run proxy
+cp -r instances/example-11234 instances/proxy-11234
+cp instances/proxy-11234/.env.example instances/proxy-11234/.env
+cp instances/proxy-11234/fallback.json.example instances/proxy-11234/fallback.json
+cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.json
 ```
 
-Edit `.env` before starting the proxy:
+Edit `instances/proxy-11234/.env` and fill at least these required fields:
 
 ```env
 PRIMARY_PROVIDER_NAME=primary-provider
-PRIMARY_PROVIDER_BASE_URL=https://primary.example
-PRIMARY_PROVIDER_API_KEY=your_key_here
-PRIMARY_PROVIDER_DEFAULT_MODEL=my-model-v2
-PORT=11234
-HOST=0.0.0.0
-INSTANCE_NAME=proxy-11234
-FALLBACK_CONFIG_PATH=./instances/example-11234/fallback.json.example
-MODEL_MAP_PATH=./instances/example-11234/model-map.json.example
+PRIMARY_PROVIDER_BASE_URL=https://provider.example
+PRIMARY_PROVIDER_API_KEY=your_api_key_here
 ```
 
-Send a non-streaming request:
+Optional but commonly changed:
+
+```env
+PRIMARY_PROVIDER_DEFAULT_MODEL=my-model-v2
+PORT=11234
+```
+
+Build and start the proxy with that instance configuration loaded:
+
+```bash
+npm run build
+env $(grep -v '^#' instances/proxy-11234/.env | xargs) npm run proxy:start
+```
+
+Verify a non-streaming request:
 
 ```bash
 curl -s http://127.0.0.1:11234/v1/responses \
-  -H "Content-Type: application/json" \
-  -d '{"model":"my-model-v2","input":"Say hello."}'
+  -H 'Content-Type: application/json' \
+  -d '{"model":"my-model-v2","input":"Reply with exactly OK.","stream":false}'
 ```
 
-Send a streaming request:
+Verify a streaming request:
 
 ```bash
 curl -N http://127.0.0.1:11234/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"model":"my-model-v2","input":"Count to three.","stream":true}'
+```
+
+Open the local admin pages:
+
+- `http://127.0.0.1:11234/admin`
+- `http://127.0.0.1:11234/admin/monitor`
+
+For the full first-run workflow, see `docs/quickstart.md`.
+
+## Example Requests
+
+Minimal non-streaming request:
+
+```bash
+curl -s http://127.0.0.1:11234/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"my-model-v2","input":"Say hello.","stream":false}'
+```
+
+Minimal streaming request:
+
+```bash
+curl -N http://127.0.0.1:11234/v1/responses \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
   -d '{"model":"my-model-v2","input":"Say hello.","stream":true}'
 ```
 
+More examples, including model aliases, fallback, and prompt cache hints, are in `docs/examples.md`.
+
 ## Admin UI
 
-The proxy includes a built-in admin UI accessible at `http://127.0.0.1:<PORT>/admin`. It provides a browser-based interface for inspecting and editing proxy configuration.
+The built-in admin UI is available at `http://127.0.0.1:<PORT>/admin`.
 
-- **Localhost only**: All `/admin` endpoints are restricted to `127.0.0.1` / `::1`. Remote requests receive `403 Forbidden`.
-- **Secret handling**: API keys and other secret values are never displayed in full. Secret fields show `***` and require explicit replacement when editing.
-- **Sections**: Overview, Providers (primary env fields and fallback table), Model Mappings, Runtime/Compatibility, and Review & Apply (Validate, Save, Reload, Rollback).
-- **Draft state**: Edits are tracked as a local draft. An "Unsaved changes" badge appears when the draft differs from the server config.
-- **Restart notice**: If `PORT` or `HOST` changes are detected, a restart-required notice is shown.
+- `/admin` lets you inspect and edit `.env`, fallback config, and model mappings.
+- `/admin/monitor` shows provider health, circuit-breaker state, and recent request activity.
+- All `/admin` routes are localhost-only.
+- Secret values are masked and require explicit replacement.
+- Changes to `PORT` or `HOST` still require a full process restart.
 
-See `docs/operations.md` for detailed usage of the admin UI workflow.
+## Docs Map
+
+- `docs/quickstart.md` - shortest path from clean checkout to first request.
+- `docs/examples.md` - copy-paste requests and config snippets.
+- `docs/configuration.md` - required fields, recommended values, advanced knobs.
+- `docs/streaming-compatibility.md` - SSE behavior, raw vs normalized mode, timeout phases.
+- `docs/operations.md` - multi-instance layout, systemd, admin workflow, safe restarts.
+- `docs/publishing-checklist.md` - final pre-push checklist before publishing to a public remote.
 
 ## Repository Layout
 
-- `src/` - production proxy source and Responses compatibility helpers.
-- `checks/` - lightweight regression checks and mock-upstream checks.
-- `tools/` - manual smoke and load-test tools.
-- `instances/` - safe example instance layouts.
-- `deploy/systemd/` - deployment templates.
-- `docs/` - configuration, streaming, and operations notes.
-- `public/admin/` - static admin UI (HTML, CSS, JS, no build step).
-
-## Configuration
-
-See `docs/configuration.md` for environment variables, fallback config, model mappings, prompt cache hints, and timeout guidance.
-
-## Streaming Compatibility
-
-See `docs/streaming-compatibility.md` for SSE behavior, `raw` vs `normalized` stream modes, timeout phases, and missing usage debugging.
-
-## Operations
-
-See `docs/operations.md` for multi-instance layout, systemd deployment, admin endpoints, logs, captures, and safe restart guidance.
-
-## Scripts
-
-- `npm run build` - compile production source to `dist/`.
-- `npm run proxy` - start the proxy through `tsx` for development.
-- `npm run proxy:start` - start the compiled proxy from `dist/json-proxy.js`.
-- `npm run basic` - run a direct Responses API smoke tool.
-- `npm run loadtest` - run a low-rate proxy load test.
-- `npm run check:sse` - validate SSE parsing and reconstruction helpers.
-- `npm run check:normalize` - validate Responses request normalization helpers.
-- `npm run check:config` - validate public-safe proxy configuration defaults.
-- `npm run check:fallback` - validate fallback classification rules.
+- `src/` - production proxy source and compatibility helpers.
+- `checks/` - regression and smoke checks.
+- `tools/` - manual smoke and load tools.
+- `instances/` - tracked example instance layouts and local runtime copies.
+- `deploy/systemd/` - systemd service template.
+- `public/admin/` - static admin UI assets.
+- `docs/` - public documentation.
 
 ## Security Notes
 
-Never commit real `.env` files, real instance directories, provider API keys, logs, captures, raw SSE failure dumps, or request bodies.
-
-The bundled admin endpoints are intended for local or trusted-network operation. Do not expose them directly to the public internet without adding authentication, authorization, and CORS restrictions. The admin UI is restricted to localhost connections only and never displays full secret values.
+- Never commit real `.env` files, real `instances/proxy-*` directories, API keys, logs, captures, or raw debug dumps.
+- Admin routes are intended for local or trusted-network use only. Do not expose them directly to the public internet.
+- Prompt cache keys must be stable. Do not include timestamps, random IDs, or request IDs.
+- Debug capture directories can contain full prompts and provider responses. Keep debug toggles off unless actively investigating an issue.
 
 ## License
 

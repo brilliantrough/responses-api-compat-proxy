@@ -2,6 +2,8 @@
 
 Deployment, process management, and operational procedures for the Responses API Compatibility Proxy.
 
+Before pushing this repository to a public remote, review `docs/publishing-checklist.md`.
+
 ---
 
 ## Table of Contents
@@ -49,7 +51,7 @@ To add a new instance:
    ```bash
    cp -r instances/example-11234 instances/proxy-NEWPORT
    ```
-2. Edit `instances/proxy-NEWPORT/.env` — set `PORT`, `INSTANCE_NAME`, provider credentials, and file paths.
+2. Edit `instances/proxy-NEWPORT/.env` — set `PORT`, `INSTANCE_NAME`, provider credentials, `PROXY_ENV_PATH`, and file paths.
 3. Edit `instances/proxy-NEWPORT/fallback.json` and `model-map.json` as needed.
 4. Start the instance using the systemd template or `npm run proxy:start`.
 
@@ -57,7 +59,7 @@ To add a new instance:
 
 ## Do Not Commit Real Instance Directories
 
-The `.gitignore` excludes `instances/proxy-*/` so that real instance directories containing secrets (API keys, provider URLs) are never committed. Only the `example-*` template directories are tracked.
+The `.gitignore` excludes `instances/proxy-*/` so that real instance directories containing secrets and local runtime paths are never committed. Only the `example-*` template directories are tracked.
 
 **Never commit:**
 
@@ -78,6 +80,12 @@ The `.gitignore` excludes `instances/proxy-*/` so that real instance directories
 | `npm run proxy` | Run the proxy through `tsx` without a separate compile step (convenience alias). |
 
 Production deployments normally run `npm run build` first, then `npm run proxy:start`. The `run.sh` wrapper script handles both steps.
+
+For a single local instance, you can also load an instance `.env` file explicitly:
+
+```bash
+env $(grep -v '^#' instances/proxy-11234/.env | xargs) npm run proxy:start
+```
 
 ---
 
@@ -181,7 +189,7 @@ http://127.0.0.1:<PORT>/admin
 
 ### Localhost-Only Constraint
 
-All `/admin` endpoints (including the UI and API) are restricted to localhost connections (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`). Remote connections receive `403 Forbidden`. This constraint cannot be relaxed via configuration — if you need remote access, use an SSH tunnel or a local reverse proxy with authentication.
+All `/admin` endpoints (including the UI and API) are restricted to localhost connections (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`). Remote connections receive `403 Forbidden`. This constraint cannot be relaxed via configuration. If you need remote access, use an SSH tunnel or a local reverse proxy with authentication. Do not expose `/admin` directly to the public internet.
 
 ### UI Sections
 
@@ -228,6 +236,18 @@ Click **Rollback** to restore the `.bak` files created by the last save:
 
 If no `.bak` files exist, rollback succeeds with an empty restored list.
 
+### Provider Monitor
+
+Open the live provider monitor on the proxy host:
+
+```
+http://127.0.0.1:<PORT>/admin/monitor
+```
+
+The monitor shows global proxy counters, provider circuit-breaker state, cooldown remaining, failure/success counts, recent failure reason, and a lightweight in-browser active-request trend.
+
+The monitor polls `GET /admin/monitor/stats` once per second while the browser tab is visible. This endpoint is localhost-only and intentionally quiet: it does not write one log line per poll. Samples are kept only in browser memory for lightweight one-minute trends.
+
 ### Restart-Required Notice
 
 When the runtime reload detects that `PORT` or `HOST` has changed (fields listed in `restartRequiredFields`), the admin UI shows a prominent restart-required notice. These changes take effect only after a full process restart (e.g., `systemctl restart`).
@@ -254,7 +274,7 @@ The `.gitignore` excludes these runtime directories:
 | `sse-failures/` | Raw upstream SSE text for failed reconstruction. | Contains full prompts and upstream responses. |
 | `dist/` | Compiled output. | Rebuildable; no secrets expected. |
 
-Debug captures are disabled by default. When enabled during incident investigation, disable them immediately afterward and delete captured files.
+Debug captures are disabled by default. When enabled during incident investigation, disable them immediately afterward and delete captured files. These directories can contain full prompts, provider responses, and other sensitive operational data.
 
 Relevant environment variables:
 
@@ -364,7 +384,7 @@ WantedBy=default.target
    sudo systemctl enable --now responses-proxy@proxy-NEWPORT
    ```
 
-**Note:** The provided systemd example is a template. Operators should adapt `WorkingDirectory`, `EnvironmentFile`, `WantedBy`, and installation mode (user vs system services) to match their deployment environment.
+**Note:** The provided systemd example is a template. Operators should adapt `WorkingDirectory`, `EnvironmentFile`, `WantedBy`, instance naming, and installation mode (user vs system services) to match their deployment environment. Do not commit local systemd unit names, private hostnames, or deployment-specific absolute paths back into the repository.
 
 ### Instance parameter
 
@@ -396,21 +416,23 @@ If the proxy was initially run from a local working directory (e.g., a home dire
    ```
 
 3. **Update file paths in `.env`:**
-   Ensure `FALLBACK_CONFIG_PATH`, `MODEL_MAP_PATH`, and any debug directory paths reference the new location:
-   ```env
-   FALLBACK_CONFIG_PATH=./instances/proxy-NEWPORT/fallback.json
-   MODEL_MAP_PATH=./instances/proxy-NEWPORT/model-map.json
-   PROXY_SSE_FAILURE_DIR=captures/proxy-NEWPORT/sse-failures
-   PROXY_STREAM_MISSING_USAGE_DIR=captures/proxy-NEWPORT/stream/missing-usage
-   ```
+    Ensure `FALLBACK_CONFIG_PATH`, `MODEL_MAP_PATH`, and any debug directory paths reference the new location:
+    ```env
+    PROXY_ENV_PATH=./instances/proxy-NEWPORT/.env
+    FALLBACK_CONFIG_PATH=./instances/proxy-NEWPORT/fallback.json
+    MODEL_MAP_PATH=./instances/proxy-NEWPORT/model-map.json
+    PROXY_SSE_FAILURE_DIR=captures/proxy-NEWPORT/sse-failures
+    PROXY_STREAM_MISSING_USAGE_DIR=captures/proxy-NEWPORT/stream/missing-usage
+    ```
 
 4. **Install and start the systemd service** using the template (see above).
 
 5. **Verify the migration:**
-   ```bash
-   curl -s http://127.0.0.1:NEWPORT/healthz
-   curl -s http://127.0.0.1:NEWPORT/admin/stats
-   ```
+    ```bash
+    curl -s http://127.0.0.1:NEWPORT/healthz
+    curl -s http://127.0.0.1:NEWPORT/admin/stats
+    curl -s http://127.0.0.1:NEWPORT/admin/monitor/stats
+    ```
 
 6. **Stop the old process** once the new instance is confirmed healthy.
 

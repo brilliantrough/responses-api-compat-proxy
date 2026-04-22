@@ -275,8 +275,21 @@ export function createAdminHandler(options: AdminHandlerOptions) {
       return true;
     }
 
+    if (method === 'GET' && url === '/admin/monitor/stats') {
+      sendJson(res, 200, {
+        ok: true,
+        ...(options.getAdminStats ? (options.getAdminStats() as Record<string, unknown>) : {}),
+      });
+      return true;
+    }
+
     if (method === 'GET' && (url === '/admin' || url === '/admin/')) {
       serveAdminStatic(res, 'admin.html', 'text/html; charset=utf-8');
+      return true;
+    }
+
+    if (method === 'GET' && (url === '/admin/monitor' || url === '/admin/monitor/')) {
+      serveAdminStatic(res, 'monitor.html', 'text/html; charset=utf-8');
       return true;
     }
 
@@ -292,6 +305,14 @@ export function createAdminHandler(options: AdminHandlerOptions) {
       }
       if (assetName === 'admin.css') {
         serveAdminStatic(res, 'admin.css', 'text/css; charset=utf-8', 'assets');
+        return true;
+      }
+      if (assetName === 'monitor.js') {
+        serveAdminStatic(res, 'monitor.js', 'application/javascript; charset=utf-8', 'assets');
+        return true;
+      }
+      if (assetName === 'monitor.css') {
+        serveAdminStatic(res, 'monitor.css', 'text/css; charset=utf-8', 'assets');
         return true;
       }
       sendJson(res, 404, { error: { message: 'Not found', type: 'not_found' } });

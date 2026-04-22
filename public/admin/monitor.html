@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Provider Monitor</title>
+<link rel="stylesheet" href="/admin/assets/monitor.css">
+</head>
+<body>
+<main class="monitor-shell">
+  <header class="monitor-header">
+    <div>
+      <h1>Provider Monitor</h1>
+      <p>Live proxy and upstream health. Polling is quiet and does not add per-refresh log lines.</p>
+    </div>
+    <p id="monitor-status">Loading...</p>
+  </header>
+
+  <section id="global-cards" class="cards"></section>
+
+  <section class="panel">
+    <h2>Provider Health</h2>
+    <table id="provider-table">
+      <thead>
+        <tr>
+          <th>State</th>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Cooldown</th>
+          <th>Failures</th>
+          <th>Successes</th>
+          <th>Last Failure</th>
+          <th>Last Success</th>
+          <th>URL</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Recent Active Requests</h2>
+    <div id="trend-bars" class="trend-bars"></div>
+  </section>
+</main>
+<script src="/admin/assets/monitor.js"></script>
+</body>
+</html>
