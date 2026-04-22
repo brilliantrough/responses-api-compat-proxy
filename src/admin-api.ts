@@ -25,6 +25,7 @@ function sendJson(res: ServerResponse, statusCode: number, body: unknown) {
   }
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
   });
   res.end(JSON.stringify(body, null, 2));
 }
@@ -89,8 +90,9 @@ export function createAdminHandler(options: AdminHandlerOptions) {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<boolean> {
-    const url = req.url ?? '';
+    const rawUrl = req.url ?? '';
     const method = req.method ?? '';
+    const url = rawUrl.split(/[?#]/)[0];
 
     if (url !== '/admin' && !url.startsWith('/admin/')) return false;
 

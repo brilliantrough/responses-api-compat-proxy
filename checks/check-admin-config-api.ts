@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -261,19 +262,45 @@ async function main() {
     const jsBody = await adminJsRes.text();
     assert.ok(jsBody.includes('admin'), 'JS should reference admin');
 
+    console.log('=== 12b. GET /admin/assets/admin.js?v=2 still serves JS ===');
+    const adminJsVersionedRes = await fetch(`${baseUrl}/admin/assets/admin.js?v=2`);
+    assert.equal(adminJsVersionedRes.status, 200);
+    assert.ok((adminJsVersionedRes.headers.get('content-type') ?? '').includes('javascript'), 'versioned JS should have javascript content-type');
+
     console.log('=== 13. GET /admin/assets/admin.css returns CSS ===');
     const adminCssRes = await fetch(`${baseUrl}/admin/assets/admin.css`);
     assert.equal(adminCssRes.status, 200);
     const cssContentType = adminCssRes.headers.get('content-type') ?? '';
     assert.ok(cssContentType.includes('text/css'), `expected text/css, got ${cssContentType}`);
 
-    console.log('=== 14. Path traversal is blocked ===');
-    const traversalRes = await fetch(`${baseUrl}/admin/assets/../src/admin-api.ts`);
-    assert.ok(traversalRes.status === 404 || traversalRes.status === 403, `path traversal should be rejected, got ${traversalRes.status}`);
+    console.log('=== 14. Encoded path traversal via raw socket is blocked ===');
+    {
+      const rawStatus = await new Promise<number>((resolve, reject) => {
+        const socket = net.createConnection({ host: '127.0.0.1', port }, () => {
+          socket.write('GET /admin/assets/%2e%2e/src/admin-api.ts HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n');
+        });
+        let resp = '';
+        socket.on('data', (chunk) => { resp += chunk.toString(); });
+        socket.on('end', () => {
+          const match = resp.match(/^HTTP\/[^ ]+ (\d+)/);
+          if (match) resolve(parseInt(match[1], 10));
+          else reject(new Error('No status in response: ' + resp.slice(0, 200)));
+        });
+        socket.on('error', reject);
+        setTimeout(() => { socket.destroy(); reject(new Error('socket timeout')); }, 5000);
+      });
+      assert.ok(rawStatus === 404 || rawStatus === 400 || rawStatus === 403, `encoded path traversal should be rejected, got ${rawStatus}`);
+    }
 
     console.log('=== 15. Unknown admin asset returns 404 ===');
     const unknownAssetRes = await fetch(`${baseUrl}/admin/assets/nonexistent.txt`);
     assert.equal(unknownAssetRes.status, 404);
+
+    console.log('=== 16. GET /admin/config has Cache-Control: no-store ===');
+    const cacheCtrlRes = await fetch(`${baseUrl}/admin/config`);
+    assert.equal(cacheCtrlRes.status, 200);
+    const cacheCtrl = cacheCtrlRes.headers.get('cache-control') ?? '';
+    assert.ok(cacheCtrl.includes('no-store'), `expected no-store in cache-control, got: ${cacheCtrl}`);
 
     console.log('\nAll admin-config-api checks passed.');
   } finally {
