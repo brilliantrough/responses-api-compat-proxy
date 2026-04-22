@@ -44,9 +44,18 @@
 
   function checkDirty() {
     if (!serverConfig) return;
-    var envChanged = JSON.stringify(draftEnv.map(function(e) { return { key: e.key, value: e.value, secretAction: e.secretAction }; })) !==
-      JSON.stringify(serverConfig.env.map(function(e) { return { key: e.key, value: e.value, secretAction: e.secret || isSecret(e.key) ? 'keep' : undefined }; }));
-    var fbChanged = JSON.stringify(draftFallback) !== JSON.stringify(serverConfig.fallbackProviders);
+    var origEnv = serverConfig.env.map(function(e) {
+      return { key: e.key, secretAction: (e.secret || isSecret(e.key)) ? 'keep' : undefined };
+    });
+    var curEnv = draftEnv.map(function(e) {
+      return { key: e.key, secretAction: e.secretAction || undefined };
+    });
+    var envChanged = JSON.stringify(curEnv) !== JSON.stringify(origEnv);
+    var fbChanged = JSON.stringify(draftFallback.map(function(p) {
+      return { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode, apiKeyEnv: p.apiKeyEnv, secretAction: p.secretAction };
+    })) !== JSON.stringify(serverConfig.fallbackProviders.map(function(p) {
+      return { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode, apiKeyEnv: p.apiKeyEnv, secretAction: 'keep' };
+    }));
     var mmChanged = JSON.stringify(draftModelMappings) !== JSON.stringify(serverConfig.modelMappings);
     setDirty(envChanged || fbChanged || mmChanged);
   }
@@ -98,7 +107,6 @@
         input.placeholder = '*** (masked)';
         input.value = '';
         input.dataset.key = e.key;
-        input.dataset.secret = '1';
         input.addEventListener('input', function() {
           var k = this.dataset.key;
           for (var j = 0; j < draftEnv.length; j++) {
@@ -150,7 +158,6 @@
       nameInput.type = 'text';
       nameInput.value = p.name;
       nameInput.dataset.idx = i;
-      nameInput.dataset.field = 'name';
       nameInput.addEventListener('input', function() {
         draftFallback[parseInt(this.dataset.idx)].name = this.value;
         checkDirty();
@@ -163,7 +170,6 @@
       urlInput.type = 'text';
       urlInput.value = p.baseUrl;
       urlInput.dataset.idx = i;
-      urlInput.dataset.field = 'baseUrl';
       urlInput.addEventListener('input', function() {
         draftFallback[parseInt(this.dataset.idx)].baseUrl = this.value;
         checkDirty();
@@ -182,7 +188,14 @@
       });
       modeSelect.dataset.idx = i;
       modeSelect.addEventListener('change', function() {
-        draftFallback[parseInt(this.dataset.idx)].apiKeyMode = this.value;
+        var idx = parseInt(this.dataset.idx);
+        draftFallback[idx].apiKeyMode = this.value;
+        if (this.value !== 'inline') {
+          draftFallback[idx].secretAction = undefined;
+          draftFallback[idx].value = undefined;
+        } else {
+          draftFallback[idx].secretAction = 'keep';
+        }
         renderFallbackProviders();
         checkDirty();
       });
@@ -190,16 +203,65 @@
       tr.appendChild(tdMode);
 
       var tdEnv = document.createElement('td');
-      var envInput = document.createElement('input');
-      envInput.type = 'text';
-      envInput.value = p.apiKeyEnv || '';
-      envInput.dataset.idx = i;
-      envInput.addEventListener('input', function() {
-        draftFallback[parseInt(this.dataset.idx)].apiKeyEnv = this.value;
-        checkDirty();
-      });
-      if (p.apiKeyMode !== 'env') envInput.disabled = true;
-      tdEnv.appendChild(envInput);
+      if (p.apiKeyMode === 'env') {
+        var envInput = document.createElement('input');
+        envInput.type = 'text';
+        envInput.value = p.apiKeyEnv || '';
+        envInput.dataset.idx = i;
+        envInput.addEventListener('input', function() {
+          draftFallback[parseInt(this.dataset.idx)].apiKeyEnv = this.value;
+          checkDirty();
+        });
+        tdEnv.appendChild(envInput);
+      } else if (p.apiKeyMode === 'inline') {
+        var inlinePwd = document.createElement('input');
+        inlinePwd.type = 'password';
+        inlinePwd.placeholder = '*** (masked)';
+        inlinePwd.value = '';
+        inlinePwd.dataset.idx = i;
+        inlinePwd.addEventListener('input', function() {
+          var idx = parseInt(this.dataset.idx);
+          if (this.value) {
+            draftFallback[idx].secretAction = 'replace';
+            draftFallback[idx].value = this.value;
+          } else {
+            draftFallback[idx].secretAction = 'keep';
+            draftFallback[idx].value = undefined;
+          }
+          checkDirty();
+        });
+        tdEnv.appendChild(inlinePwd);
+
+        var actionSel = document.createElement('select');
+        actionSel.style.marginTop = '0.3rem';
+        ['keep', 'replace', 'clear'].forEach(function(a) {
+          var opt = document.createElement('option');
+          opt.value = a;
+          opt.textContent = a;
+          if ((p.secretAction || 'keep') === a) opt.selected = true;
+          actionSel.appendChild(opt);
+        });
+        actionSel.dataset.idx = i;
+        actionSel.addEventListener('change', function() {
+          var idx = parseInt(this.dataset.idx);
+          var action = this.value;
+          draftFallback[idx].secretAction = action;
+          if (action === 'keep') {
+            draftFallback[idx].value = undefined;
+          } else if (action === 'clear') {
+            draftFallback[idx].value = undefined;
+          }
+          renderFallbackProviders();
+          checkDirty();
+        });
+        var actionLabel = document.createElement('div');
+        actionLabel.style.fontSize = '0.75rem';
+        actionLabel.style.color = '#888';
+        actionLabel.style.marginTop = '0.2rem';
+        actionLabel.textContent = 'Action:';
+        actionLabel.appendChild(actionSel);
+        tdEnv.appendChild(actionLabel);
+      }
       tr.appendChild(tdEnv);
 
       var tdConf = document.createElement('td');
@@ -215,14 +277,23 @@
     container.innerHTML = '';
     var keys = Object.keys(draftModelMappings);
     for (var i = 0; i < keys.length; i++) {
-      (function(alias) {
+      (function(alias, idx) {
         var row = document.createElement('div');
         row.className = 'kv-row';
         var aliasInput = document.createElement('input');
         aliasInput.type = 'text';
         aliasInput.value = alias;
         aliasInput.placeholder = 'alias';
-        aliasInput.readOnly = true;
+        aliasInput.dataset.origAlias = alias;
+        aliasInput.addEventListener('input', function() {
+          var orig = this.dataset.origAlias;
+          var newAlias = this.value;
+          var target = draftModelMappings[orig];
+          delete draftModelMappings[orig];
+          draftModelMappings[newAlias] = target;
+          this.dataset.origAlias = newAlias;
+          checkDirty();
+        });
         row.appendChild(aliasInput);
 
         var arrow = document.createElement('span');
@@ -233,9 +304,9 @@
         targetInput.type = 'text';
         targetInput.value = draftModelMappings[alias];
         targetInput.placeholder = 'target model';
-        targetInput.dataset.alias = alias;
+        targetInput.dataset.origAlias = alias;
         targetInput.addEventListener('input', function() {
-          draftModelMappings[this.dataset.alias] = this.value;
+          draftModelMappings[this.dataset.origAlias] = this.value;
           checkDirty();
         });
         row.appendChild(targetInput);
@@ -249,7 +320,7 @@
         });
         row.appendChild(delBtn);
         container.appendChild(row);
-      })(keys[i]);
+      })(keys[i], i);
     }
   }
 
@@ -283,24 +354,47 @@
 
   function initDraft() {
     draftEnv = (serverConfig.env || []).map(function(e) {
-      var d = { key: e.key, value: e.value };
+      var d = { key: e.key };
       if (e.secret || isSecret(e.key)) {
+        d.secretAction = 'keep';
+      } else {
+        d.value = e.value;
+      }
+      return d;
+    });
+    draftFallback = (serverConfig.fallbackProviders || []).map(function(p) {
+      var d = JSON.parse(JSON.stringify(p));
+      if (d.apiKeyMode === 'inline') {
         d.secretAction = 'keep';
       }
       return d;
     });
-    draftFallback = JSON.parse(JSON.stringify(serverConfig.fallbackProviders || []));
     draftModelMappings = JSON.parse(JSON.stringify(serverConfig.modelMappings || {}));
   }
 
   function buildDraftPayload() {
     return {
-      env: draftEnv,
+      env: draftEnv.map(function(e) {
+        var d = { key: e.key };
+        if (e.secretAction) {
+          d.secretAction = e.secretAction;
+          if (e.secretAction === 'replace' && e.value !== undefined) {
+            d.value = e.value;
+          }
+        } else {
+          d.value = e.value;
+        }
+        return d;
+      }),
       fallbackProviders: draftFallback.map(function(p) {
         var out = { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode || 'none' };
-        if (p.apiKeyEnv) out.apiKeyEnv = p.apiKeyEnv;
-        if (p.secretAction) out.secretAction = p.secretAction;
-        if (p.value) out.value = p.value;
+        if (p.apiKeyMode === 'env' && p.apiKeyEnv) out.apiKeyEnv = p.apiKeyEnv;
+        if (p.apiKeyMode === 'inline') {
+          out.secretAction = p.secretAction || 'keep';
+          if (p.secretAction === 'replace' && p.value) {
+            out.value = p.value;
+          }
+        }
         return out;
       }),
       modelMappings: JSON.parse(JSON.stringify(draftModelMappings))

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -63,6 +63,7 @@ async function main() {
     writeFallbackJson(fallbackPath, {
       fallback_api_config: [
         { name: 'fb-a', base_url: 'https://fb.example', api_key_env: 'FB_A_KEY' },
+        { name: 'fb-inline', base_url: 'https://inline.example', api_key: 'inline-secret-xyz' },
       ],
     });
     writeModelMapJson(modelMapPath, { model_mappings: { 'alias-x': 'model-y' } });
@@ -107,7 +108,7 @@ async function main() {
       assert.ok(html.includes(id), `HTML should contain element id="${id}"`);
     }
 
-    console.log('=== 3. JS loads and references loadConfig ===');
+    console.log('=== 3. JS loads and references key behaviors ===');
     const jsRes = await fetch(`${baseUrl}/admin/assets/admin.js`);
     assert.equal(jsRes.status, 200);
     const js = await jsRes.text();
@@ -149,37 +150,149 @@ async function main() {
     assert.equal(secretEntry!.value, '***', 'API key should be masked');
 
     const fbArr = config.fallbackProviders as Array<Record<string, unknown>>;
-    assert.equal(fbArr.length, 1, 'should have one fallback provider');
+    assert.equal(fbArr.length, 2, 'should have two fallback providers');
     assert.equal(fbArr[0].name, 'fb-a');
     assert.equal(fbArr[0].apiKeyMode, 'env');
-    assert.equal(fbArr[0].apiKeyMasked, '***', 'fallback key should be masked');
+    assert.equal(fbArr[0].apiKeyMasked, '***', 'fallback env key should be masked');
+    assert.equal(fbArr[1].name, 'fb-inline');
+    assert.equal(fbArr[1].apiKeyMode, 'inline');
+    assert.equal(fbArr[1].apiKeyMasked, '***', 'fallback inline key should be masked');
 
     const mm = config.modelMappings as Record<string, string>;
     assert.equal(mm['alias-x'], 'model-y', 'model mapping should be present');
 
-    console.log('=== 6. Validate with draft payload from config ===');
-    const draftPayload = {
-      env: envArr.map(e => ({
-        key: e.key,
-        value: e.value,
-        ...(e.secret ? { secretAction: 'keep' as const } : {}),
-      })),
-      fallbackProviders: fbArr.map(p => ({
-        name: p.name,
-        baseUrl: p.baseUrl,
-        apiKeyMode: p.apiKeyMode,
-        apiKeyEnv: p.apiKeyEnv,
-        secretAction: 'keep' as const,
-      })),
-      modelMappings: mm,
-    };
-    const validateRes = await fetch(`${baseUrl}/admin/config/validate`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(draftPayload),
-    });
-    const validateBody = (await validateRes.json()) as Record<string, unknown>;
-    assert.equal(validateBody.valid, true, 'round-trip draft should validate');
+    console.log('=== 6. Secret env entries with keep do not leak masked value ===');
+    {
+      const draftEnvSecretKeep = envArr
+        .filter(e => e.secret)
+        .map(e => ({ key: e.key, secretAction: 'keep' as const }));
+      assert.ok(draftEnvSecretKeep.length > 0, 'should have at least one secret env entry');
+
+      for (const entry of draftEnvSecretKeep) {
+        assert.ok(!('value' in entry), `secret "${entry.key}" with keep must not include value field`);
+      }
+
+      const validateRes = await fetch(`${baseUrl}/admin/config/validate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          env: [
+            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
+            ...draftEnvSecretKeep,
+          ],
+          fallbackProviders: fbArr.map(p => ({
+            name: p.name,
+            baseUrl: p.baseUrl,
+            apiKeyMode: p.apiKeyMode,
+            ...(p.apiKeyEnv ? { apiKeyEnv: p.apiKeyEnv } : {}),
+            secretAction: 'keep' as const,
+          })),
+          modelMappings: mm,
+        }),
+      });
+      const validateBody = (await validateRes.json()) as Record<string, unknown>;
+      assert.equal(validateBody.valid, true, 'keep-without-value draft should validate');
+    }
+
+    console.log('=== 7. Inline fallback secret: keep preserves existing inline key ===');
+    {
+      const origFallback = JSON.parse(readFileSync(fallbackPath, 'utf8'));
+      const origInlineKey = (origFallback.fallback_api_config as Array<Record<string, string>>)
+        .find(p => p.name === 'fb-inline')!.api_key;
+      assert.equal(origInlineKey, 'inline-secret-xyz', 'original inline key should be present');
+
+      const saveRes = await fetch(`${baseUrl}/admin/config`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          env: [
+            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
+            ...envArr.filter(e => e.secret).map(e => ({ key: e.key, secretAction: 'keep' as const })),
+          ],
+          fallbackProviders: [
+            { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'FB_A_KEY' },
+            { name: 'fb-inline', baseUrl: 'https://inline.example', apiKeyMode: 'inline', secretAction: 'keep' as const },
+          ],
+          modelMappings: mm,
+        }),
+      });
+      assert.equal(saveRes.status, 200);
+      const saveBody = (await saveRes.json()) as Record<string, unknown>;
+      assert.equal(saveBody.ok, true, 'save should succeed');
+
+      const afterFallback = JSON.parse(readFileSync(fallbackPath, 'utf8'));
+      const afterInline = (afterFallback.fallback_api_config as Array<Record<string, string>>)
+        .find(p => p.name === 'fb-inline')!;
+      assert.equal(afterInline.api_key, origInlineKey, 'inline key should be preserved on keep');
+    }
+
+    console.log('=== 8. Inline fallback secret: replace updates key, clear removes it ===');
+    {
+      const saveReplace = await fetch(`${baseUrl}/admin/config`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          env: [
+            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
+            ...envArr.filter(e => e.secret).map(e => ({ key: e.key, secretAction: 'keep' as const })),
+          ],
+          fallbackProviders: [
+            { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'FB_A_KEY' },
+            { name: 'fb-inline', baseUrl: 'https://inline.example', apiKeyMode: 'inline', secretAction: 'replace' as const, value: 'new-inline-key' },
+          ],
+          modelMappings: mm,
+        }),
+      });
+      assert.equal(saveReplace.status, 200);
+      const replaced = JSON.parse(readFileSync(fallbackPath, 'utf8'));
+      const replacedEntry = (replaced.fallback_api_config as Array<Record<string, string>>)
+        .find(p => p.name === 'fb-inline')!;
+      assert.equal(replacedEntry.api_key, 'new-inline-key', 'inline key should be replaced');
+
+      const saveClear = await fetch(`${baseUrl}/admin/config`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          env: [
+            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
+            ...envArr.filter(e => e.secret).map(e => ({ key: e.key, secretAction: 'keep' as const })),
+          ],
+          fallbackProviders: [
+            { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'FB_A_KEY' },
+            { name: 'fb-inline', baseUrl: 'https://inline.example', apiKeyMode: 'inline', secretAction: 'clear' as const },
+          ],
+          modelMappings: mm,
+        }),
+      });
+      assert.equal(saveClear.status, 200);
+      const cleared = JSON.parse(readFileSync(fallbackPath, 'utf8'));
+      const clearedEntry = (cleared.fallback_api_config as Array<Record<string, string>>)
+        .find(p => p.name === 'fb-inline')!;
+      assert.ok(!('api_key' in clearedEntry), 'inline key should be removed on clear');
+    }
+
+    console.log('=== 9. Model mapping alias edit renames key ===');
+    {
+      const saveRename = await fetch(`${baseUrl}/admin/config`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          env: [
+            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
+            ...envArr.filter(e => e.secret).map(e => ({ key: e.key, secretAction: 'keep' as const })),
+          ],
+          fallbackProviders: [
+            { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'FB_A_KEY' },
+            { name: 'fb-inline', baseUrl: 'https://inline.example', apiKeyMode: 'none' },
+          ],
+          modelMappings: { 'alias-renamed': 'model-z' },
+        }),
+      });
+      assert.equal(saveRename.status, 200);
+      const mmAfter = JSON.parse(readFileSync(modelMapPath, 'utf8'));
+      assert.deepEqual(mmAfter.model_mappings, { 'alias-renamed': 'model-z' }, 'model mapping should be renamed');
+      assert.ok(!('alias-x' in mmAfter.model_mappings), 'old alias should be gone');
+    }
 
     console.log('\nAll admin UI smoke checks passed.');
   } finally {
