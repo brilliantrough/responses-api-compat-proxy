@@ -327,22 +327,18 @@ The provided `docker-compose.yaml`:
 - builds the local `Dockerfile`,
 - loads env values from `./instances/proxy-11234/.env`,
 - mounts `./instances/proxy-11234` into the container at `/app/instances/proxy-11234`,
-- publishes `127.0.0.1:${DOCKER_PROXY_PORT:-11234}:11234`,
+- publishes `127.0.0.1:11234:11234`,
 - sets `PROXY_ADMIN_ALLOW_HOST=1` so the host can reach `/admin` through the mapped port.
 
-If `11234` is already in use on the host, override the published host port:
-
-```bash
-DOCKER_PROXY_PORT=11334 docker compose up --build
-```
+If `11234` is already in use on the host, edit the host side of the `ports:` mapping in `docker-compose.yaml`.
 
 ### Access from the Host
 
 After startup:
 
-- API: `http://127.0.0.1:<host-port>/v1/responses`
-- Config UI: `http://127.0.0.1:<host-port>/admin`
-- Provider monitor: `http://127.0.0.1:<host-port>/admin/monitor`
+- API: `http://127.0.0.1:11234/v1/responses`
+- Config UI: `http://127.0.0.1:11234/admin`
+- Provider monitor: `http://127.0.0.1:11234/admin/monitor`
 
 ### Logs and Lifecycle
 

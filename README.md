@@ -94,20 +94,16 @@ docker compose up --build
 The compose example:
 
 - mounts `instances/proxy-11234/` into the container,
-- publishes `127.0.0.1:${DOCKER_PROXY_PORT:-11234}`,
+- publishes `127.0.0.1:11234`,
 - enables Docker-specific host access for `/admin` with `PROXY_ADMIN_ALLOW_HOST=1`.
 
-If `11234` is already in use on your host, pick another host port:
-
-```bash
-DOCKER_PROXY_PORT=11334 docker compose up --build
-```
+If `11234` is already in use on your host, edit the host side of the port mapping in `docker-compose.yaml`.
 
 After startup, these endpoints are available from the host:
 
-- `http://127.0.0.1:<host-port>/v1/responses`
-- `http://127.0.0.1:<host-port>/admin`
-- `http://127.0.0.1:<host-port>/admin/monitor`
+- `http://127.0.0.1:11234/v1/responses`
+- `http://127.0.0.1:11234/admin`
+- `http://127.0.0.1:11234/admin/monitor`
 
 Keep the published admin-capable port on a trusted host or behind additional protection if you change the port binding away from `127.0.0.1`.
 
