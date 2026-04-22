@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { createServer } from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolve } from 'node:path';
 
 import { isJsonRecord, normalizeInput, type JsonRecord, type JsonValue } from './responses-input-normalization.js';
@@ -29,7 +30,7 @@ import {
 } from './responses-sse.js';
 import { createAdminHandler } from './admin-api.js';
 import { createConfigFileStoreFromPaths } from './config-files.js';
-import { createRuntimeConfigStore, createEndpointStateKey } from './runtime-config.js';
+import { createRuntimeConfigStore, createEndpointStateKey, type RuntimeSnapshot } from './runtime-config.js';
 
 const _envPath = process.env.PROXY_ENV_PATH ?? resolve('.env');
 const runtimeStore = createRuntimeConfigStore({ envPath: _envPath });
@@ -41,7 +42,13 @@ const _adminConfigStore = createConfigFileStoreFromPaths({
 });
 const _adminHandler = createAdminHandler({ configStore: _adminConfigStore, runtimeStore });
 
-let _liveConfig: ProxyRuntimeConfig = runtimeStore.getSnapshot().config;
+const _initialSnapshot = runtimeStore.getSnapshot();
+const _requestContext = new AsyncLocalStorage<RuntimeSnapshot>();
+
+function getConfig(): ProxyRuntimeConfig {
+  const snap = _requestContext.getStore();
+  return snap ? snap.config : _initialSnapshot.config;
+}
 
 type UpstreamAttempt = {
   endpoint: UpstreamEndpoint;
@@ -434,14 +441,14 @@ function getEndpointHealthSnapshot(endpoint: UpstreamEndpoint) {
 
 function getCooldownMsForReason(reason: FallbackReason | 'connect_timeout' | 'body_timeout') {
   if (reason === 'connect_timeout' || reason === 'body_timeout' || reason === 'headers_only_timeout') {
-    return _liveConfig.endpointTimeoutCooldownMs;
+    return getConfig().endpointTimeoutCooldownMs;
   }
 
   if (reason === 'retryable_4xx' || reason === 'compat_4xx') {
-    return _liveConfig.endpointAuthCooldownMs;
+    return getConfig().endpointAuthCooldownMs;
   }
 
-  return _liveConfig.endpointInvalidResponseCooldownMs;
+  return getConfig().endpointInvalidResponseCooldownMs;
 }
 
 function shouldOpenCircuitImmediately(reason: FallbackReason | 'connect_timeout' | 'body_timeout') {
@@ -469,7 +476,7 @@ function markEndpointFailure(
   health.lastFailureReason = reason;
   health.lastFailureAt = now;
 
-  const shouldOpenNow = shouldOpenCircuitImmediately(reason) || health.failureCount >= Math.max(1, _liveConfig.endpointFailureThreshold);
+  const shouldOpenNow = shouldOpenCircuitImmediately(reason) || health.failureCount >= Math.max(1, getConfig().endpointFailureThreshold);
   if (shouldOpenNow) {
     const cooldownMs = getCooldownMsForReason(reason);
     health.state = cooldownMs > 0 ? 'open' : 'closed';
@@ -535,7 +542,7 @@ function isEndpointAvailable(endpoint: UpstreamEndpoint, requestId?: string) {
     }
   }
 
-  if (health.state === 'half_open' && health.halfOpenProbeInFlight >= Math.max(1, _liveConfig.endpointHalfOpenMaxProbes)) {
+  if (health.state === 'half_open' && health.halfOpenProbeInFlight >= Math.max(1, getConfig().endpointHalfOpenMaxProbes)) {
     if (requestId) {
       logRequest(requestId, 'skipping upstream because half-open probe is already in flight', {
         endpointName: endpoint.name,
@@ -573,11 +580,11 @@ function canFallbackWithinBudget(
     return false;
   }
 
-  if (budget.attemptsUsed >= Math.max(0, _liveConfig.maxFallbackAttempts)) {
+  if (budget.attemptsUsed >= Math.max(0, getConfig().maxFallbackAttempts)) {
     return false;
   }
 
-  if (_liveConfig.maxFallbackTotalMs > 0 && Date.now() - budget.startedAt >= _liveConfig.maxFallbackTotalMs) {
+  if (getConfig().maxFallbackTotalMs > 0 && Date.now() - budget.startedAt >= getConfig().maxFallbackTotalMs) {
     return false;
   }
 
@@ -595,11 +602,11 @@ function canContinueSearchingUpstreams(
     return false;
   }
 
-  if (budget.attemptsUsed >= Math.max(0, _liveConfig.maxFallbackAttempts)) {
+  if (budget.attemptsUsed >= Math.max(0, getConfig().maxFallbackAttempts)) {
     return false;
   }
 
-  if (_liveConfig.maxFallbackTotalMs > 0 && Date.now() - budget.startedAt >= _liveConfig.maxFallbackTotalMs) {
+  if (getConfig().maxFallbackTotalMs > 0 && Date.now() - budget.startedAt >= getConfig().maxFallbackTotalMs) {
     return false;
   }
 
@@ -701,7 +708,7 @@ function sanitizeForLog(value: JsonValue, maxStringLength = 1200): JsonValue {
 }
 
 function logRequestBodiesPreview(requestId: string, requestBody: JsonRecord, upstreamBody: JsonRecord) {
-  if (!_liveConfig.logRequestBodies) {
+  if (!getConfig().logRequestBodies) {
     return;
   }
 
@@ -712,7 +719,7 @@ function logRequestBodiesPreview(requestId: string, requestBody: JsonRecord, ups
 }
 
 function logSseDebug(requestId: string, events: Array<{ event: string; data: string }>) {
-  if (!_liveConfig.debugSse) {
+  if (!getConfig().debugSse) {
     return;
   }
 
@@ -760,31 +767,31 @@ function logForwardingUpstream(
     firstByteMs: responsesFirstByteTimeoutMs,
   };
 
-  if (_liveConfig.forceStoreFalse) {
+  if (getConfig().forceStoreFalse) {
     details.forceStoreFalse = true;
   }
 
-  if (_liveConfig.defaultPromptCacheRetention !== null) {
-    details.promptCacheRetention = _liveConfig.defaultPromptCacheRetention;
+  if (getConfig().defaultPromptCacheRetention !== null) {
+    details.promptCacheRetention = getConfig().defaultPromptCacheRetention;
   }
 
-  if (_liveConfig.defaultPromptCacheKey !== null) {
-    details.promptCacheKey = _liveConfig.defaultPromptCacheKey;
+  if (getConfig().defaultPromptCacheKey !== null) {
+    details.promptCacheKey = getConfig().defaultPromptCacheKey;
   }
 
-  if (_liveConfig.clearDeveloperContent) {
+  if (getConfig().clearDeveloperContent) {
     details.clearDeveloper = true;
   }
 
-  if (_liveConfig.clearSystemContent) {
+  if (getConfig().clearSystemContent) {
     details.clearSystem = true;
   }
 
-  if (_liveConfig.clearInstructions) {
+  if (getConfig().clearInstructions) {
     details.clearInstructions = true;
   }
 
-  if (_liveConfig.overrideInstructionsText !== null) {
+  if (getConfig().overrideInstructionsText !== null) {
     details.overrideInstructions = true;
   }
 
@@ -797,20 +804,20 @@ async function writeSseFailureDebug(
   upstreamStatus: number,
   upstreamText: string,
 ) {
-  if (!_liveConfig.sseFailureDebugEnabled) {
+  if (!getConfig().sseFailureDebugEnabled) {
     return;
   }
 
   try {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
-    await fs.mkdir(_liveConfig.sseFailureDebugDir, { recursive: true });
+    await fs.mkdir(getConfig().sseFailureDebugDir, { recursive: true });
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const fileBase = `${timestamp}_${requestId}_status${upstreamStatus}`;
 
     await fs.writeFile(
-      path.join(_liveConfig.sseFailureDebugDir, `${fileBase}.json`),
+      path.join(getConfig().sseFailureDebugDir, `${fileBase}.json`),
       JSON.stringify(
         {
           requestId,
@@ -823,7 +830,7 @@ async function writeSseFailureDebug(
       ),
       'utf8',
     );
-    await fs.writeFile(path.join(_liveConfig.sseFailureDebugDir, `${fileBase}.sse.txt`), upstreamText, 'utf8');
+    await fs.writeFile(path.join(getConfig().sseFailureDebugDir, `${fileBase}.sse.txt`), upstreamText, 'utf8');
   } catch (error) {
     logRequest(requestId, 'failed to write SSE failure debug files', {
       error: error instanceof Error ? { name: error.name, message: error.message } : String(error),
@@ -840,20 +847,20 @@ async function writeStreamMissingUsageDebug(
   streamEventCount: number,
   upstreamText: string,
 ) {
-  if (!_liveConfig.streamMissingUsageDebugEnabled) {
+  if (!getConfig().streamMissingUsageDebugEnabled) {
     return;
   }
 
   try {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
-    await fs.mkdir(_liveConfig.streamMissingUsageDebugDir, { recursive: true });
+    await fs.mkdir(getConfig().streamMissingUsageDebugDir, { recursive: true });
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const fileBase = `${timestamp}_${requestId}_status${upstreamStatus}`;
 
     await fs.writeFile(
-      path.join(_liveConfig.streamMissingUsageDebugDir, `${fileBase}.json`),
+      path.join(getConfig().streamMissingUsageDebugDir, `${fileBase}.json`),
       JSON.stringify(
         {
           requestId,
@@ -869,7 +876,7 @@ async function writeStreamMissingUsageDebug(
       ),
       'utf8',
     );
-    await fs.writeFile(path.join(_liveConfig.streamMissingUsageDebugDir, `${fileBase}.sse.txt`), upstreamText, 'utf8');
+    await fs.writeFile(path.join(getConfig().streamMissingUsageDebugDir, `${fileBase}.sse.txt`), upstreamText, 'utf8');
   } catch (error) {
     logRequest(requestId, 'failed to write stream missing usage debug files', {
       error: error instanceof Error ? { name: error.name, message: error.message } : String(error),
@@ -913,7 +920,7 @@ function cacheResponse(responseObject: JsonRecord) {
   responseCache.set(id, responseObject);
   proxyStats.cacheStores += 1;
 
-  while (responseCache.size > _liveConfig.maxCachedResponses) {
+  while (responseCache.size > getConfig().maxCachedResponses) {
     const oldestKey = responseCache.keys().next().value;
     if (!oldestKey) {
       break;
@@ -943,46 +950,46 @@ function recordStatus(statusCode: number) {
 
 function getAdminStats() {
   return {
-    instanceName: _liveConfig.instanceName,
-    host: _liveConfig.host,
-    port: _liveConfig.port,
-    primaryProviderName: _liveConfig.primaryProviderName,
-    upstreamUrl: _liveConfig.upstreamUrl,
-    upstreamModelsUrl: _liveConfig.upstreamModelsUrl,
-    fallbackConfigPath: _liveConfig.fallbackConfigPath,
-    modelMappingPath: _liveConfig.modelMappingPath,
-    fallbackNames: _liveConfig.fallbackEndpoints.map(item => item.name),
-    modelMappings: _liveConfig.modelMappings,
+    instanceName: getConfig().instanceName,
+    host: getConfig().host,
+    port: getConfig().port,
+    primaryProviderName: getConfig().primaryProviderName,
+    upstreamUrl: getConfig().upstreamUrl,
+    upstreamModelsUrl: getConfig().upstreamModelsUrl,
+    fallbackConfigPath: getConfig().fallbackConfigPath,
+    modelMappingPath: getConfig().modelMappingPath,
+    fallbackNames: getConfig().fallbackEndpoints.map(item => item.name),
+    modelMappings: getConfig().modelMappings,
     activeRequests,
-    maxConcurrentRequests: _liveConfig.maxConcurrentRequests,
+    maxConcurrentRequests: getConfig().maxConcurrentRequests,
     cachedResponses: responseCache.size,
-    maxCachedResponses: _liveConfig.maxCachedResponses,
-    upstreamTimeoutMs: _liveConfig.upstreamTimeoutMs,
-    nonStreamingRequestTimeoutMs: _liveConfig.nonStreamingRequestTimeoutMs,
-    firstByteTimeoutMs: _liveConfig.firstByteTimeoutMs,
-    firstTextTimeoutMs: _liveConfig.firstTextTimeoutMs,
-    streamIdleTimeoutMs: _liveConfig.streamIdleTimeoutMs,
-    totalRequestTimeoutMs: _liveConfig.totalRequestTimeoutMs,
-    defaultStreamMode: _liveConfig.defaultStreamMode,
-    forceStoreFalse: _liveConfig.forceStoreFalse,
-    clearDeveloperContent: _liveConfig.clearDeveloperContent,
-    clearInstructions: _liveConfig.clearInstructions,
-    clearSystemContent: _liveConfig.clearSystemContent,
-    overrideInstructionsText: _liveConfig.overrideInstructionsText,
-    logRequestBodies: _liveConfig.logRequestBodies,
-    debugSse: _liveConfig.debugSse,
-    fallbackOnRetryable4xx: _liveConfig.fallbackOnRetryable4xx,
-    fallbackOnCompat4xx: _liveConfig.fallbackOnCompat4xx,
-    compatFallbackPatterns: _liveConfig.compatFallbackPatterns,
-    clientErrorPatterns: _liveConfig.clientErrorPatterns,
-    endpointTimeoutCooldownMs: _liveConfig.endpointTimeoutCooldownMs,
-    endpointInvalidResponseCooldownMs: _liveConfig.endpointInvalidResponseCooldownMs,
-    endpointAuthCooldownMs: _liveConfig.endpointAuthCooldownMs,
-    endpointFailureThreshold: _liveConfig.endpointFailureThreshold,
-    endpointHalfOpenMaxProbes: _liveConfig.endpointHalfOpenMaxProbes,
-    maxFallbackAttempts: _liveConfig.maxFallbackAttempts,
-    maxFallbackTotalMs: _liveConfig.maxFallbackTotalMs,
-    endpointHealth: _liveConfig.responsesEndpoints.map(endpoint => ({
+    maxCachedResponses: getConfig().maxCachedResponses,
+    upstreamTimeoutMs: getConfig().upstreamTimeoutMs,
+    nonStreamingRequestTimeoutMs: getConfig().nonStreamingRequestTimeoutMs,
+    firstByteTimeoutMs: getConfig().firstByteTimeoutMs,
+    firstTextTimeoutMs: getConfig().firstTextTimeoutMs,
+    streamIdleTimeoutMs: getConfig().streamIdleTimeoutMs,
+    totalRequestTimeoutMs: getConfig().totalRequestTimeoutMs,
+    defaultStreamMode: getConfig().defaultStreamMode,
+    forceStoreFalse: getConfig().forceStoreFalse,
+    clearDeveloperContent: getConfig().clearDeveloperContent,
+    clearInstructions: getConfig().clearInstructions,
+    clearSystemContent: getConfig().clearSystemContent,
+    overrideInstructionsText: getConfig().overrideInstructionsText,
+    logRequestBodies: getConfig().logRequestBodies,
+    debugSse: getConfig().debugSse,
+    fallbackOnRetryable4xx: getConfig().fallbackOnRetryable4xx,
+    fallbackOnCompat4xx: getConfig().fallbackOnCompat4xx,
+    compatFallbackPatterns: getConfig().compatFallbackPatterns,
+    clientErrorPatterns: getConfig().clientErrorPatterns,
+    endpointTimeoutCooldownMs: getConfig().endpointTimeoutCooldownMs,
+    endpointInvalidResponseCooldownMs: getConfig().endpointInvalidResponseCooldownMs,
+    endpointAuthCooldownMs: getConfig().endpointAuthCooldownMs,
+    endpointFailureThreshold: getConfig().endpointFailureThreshold,
+    endpointHalfOpenMaxProbes: getConfig().endpointHalfOpenMaxProbes,
+    maxFallbackAttempts: getConfig().maxFallbackAttempts,
+    maxFallbackTotalMs: getConfig().maxFallbackTotalMs,
+    endpointHealth: getConfig().responsesEndpoints.map(endpoint => ({
       name: endpoint.name,
       url: endpoint.url,
       isFallback: endpoint.isFallback,
@@ -1059,11 +1066,11 @@ function createTimeoutMessage(
   phase: 'connect' | 'first-byte' | 'first-text' | 'idle' | 'total',
   timeouts?: { connect?: number; firstByte?: number; firstText?: number; idle?: number; total?: number },
 ) {
-  const connectTimeoutMs = timeouts?.connect ?? _liveConfig.upstreamTimeoutMs;
-  const firstChunkTimeoutMs = timeouts?.firstByte ?? _liveConfig.firstByteTimeoutMs;
-  const firstTextPhaseTimeoutMs = timeouts?.firstText ?? _liveConfig.firstTextTimeoutMs;
-  const idleTimeoutMs = timeouts?.idle ?? _liveConfig.streamIdleTimeoutMs;
-  const totalTimeoutMs = timeouts?.total ?? _liveConfig.totalRequestTimeoutMs;
+  const connectTimeoutMs = timeouts?.connect ?? getConfig().upstreamTimeoutMs;
+  const firstChunkTimeoutMs = timeouts?.firstByte ?? getConfig().firstByteTimeoutMs;
+  const firstTextPhaseTimeoutMs = timeouts?.firstText ?? getConfig().firstTextTimeoutMs;
+  const idleTimeoutMs = timeouts?.idle ?? getConfig().streamIdleTimeoutMs;
+  const totalTimeoutMs = timeouts?.total ?? getConfig().totalRequestTimeoutMs;
 
   if (phase === 'connect') {
     return `Upstream did not produce an initial response within ${connectTimeoutMs}ms`;
@@ -1085,11 +1092,11 @@ function createTimeoutMessage(
 }
 
 function getResponsesConnectTimeoutMs(streamResponse: boolean) {
-  return streamResponse ? _liveConfig.upstreamTimeoutMs : _liveConfig.nonStreamingRequestTimeoutMs;
+  return streamResponse ? getConfig().upstreamTimeoutMs : getConfig().nonStreamingRequestTimeoutMs;
 }
 
 function getResponsesFirstByteTimeoutMs(streamResponse: boolean) {
-  return streamResponse ? _liveConfig.firstByteTimeoutMs : _liveConfig.nonStreamingRequestTimeoutMs;
+  return streamResponse ? getConfig().firstByteTimeoutMs : getConfig().nonStreamingRequestTimeoutMs;
 }
 
 function wantsStreaming(req: import('node:http').IncomingMessage, body: JsonRecord) {
@@ -1115,46 +1122,46 @@ function getStreamMode(req: import('node:http').IncomingMessage, body: JsonRecor
     return headerMode;
   }
 
-  return _liveConfig.defaultStreamMode;
+  return getConfig().defaultStreamMode;
 }
 
 function normalizeRequestBody(body: JsonRecord, stream: boolean): JsonRecord {
   const { proxy_stream_mode: _proxyStreamMode, ...rest } = body;
-  const requestedModel = typeof rest.model === 'string' ? rest.model : _liveConfig.defaultModel;
-  const mappedModel = _liveConfig.modelMappings[requestedModel] ?? requestedModel;
+  const requestedModel = typeof rest.model === 'string' ? rest.model : getConfig().defaultModel;
+  const mappedModel = getConfig().modelMappings[requestedModel] ?? requestedModel;
   const instructions =
-    _liveConfig.overrideInstructionsText !== null
-      ? _liveConfig.overrideInstructionsText
-      : _liveConfig.clearInstructions && typeof rest.instructions === 'string'
+    getConfig().overrideInstructionsText !== null
+      ? getConfig().overrideInstructionsText
+      : getConfig().clearInstructions && typeof rest.instructions === 'string'
       ? ''
       : rest.instructions;
   const promptCacheRetention =
     typeof rest.prompt_cache_retention === 'string' && ['in_memory', '24h'].includes(rest.prompt_cache_retention)
       ? rest.prompt_cache_retention
-      : _liveConfig.defaultPromptCacheRetention;
+      : getConfig().defaultPromptCacheRetention;
   const promptCacheKey =
     typeof rest.prompt_cache_key === 'string' && rest.prompt_cache_key.trim().length > 0
       ? rest.prompt_cache_key
-      : _liveConfig.defaultPromptCacheKey;
+      : getConfig().defaultPromptCacheKey;
 
   return {
     ...rest,
     model: mappedModel,
-    ...(rest.instructions === undefined && _liveConfig.overrideInstructionsText === null ? {} : { instructions }),
+    ...(rest.instructions === undefined && getConfig().overrideInstructionsText === null ? {} : { instructions }),
     ...(promptCacheRetention === null ? {} : { prompt_cache_retention: promptCacheRetention }),
     ...(promptCacheKey === null ? {} : { prompt_cache_key: promptCacheKey }),
     input: normalizeInput(rest.input, {
-      clearDeveloperContent: _liveConfig.clearDeveloperContent,
-      clearSystemContent: _liveConfig.clearSystemContent,
-      convertSystemToDeveloper: _liveConfig.convertSystemToDeveloper,
+      clearDeveloperContent: getConfig().clearDeveloperContent,
+      clearSystemContent: getConfig().clearSystemContent,
+      convertSystemToDeveloper: getConfig().convertSystemToDeveloper,
     }),
     stream,
-    ...(_liveConfig.forceStoreFalse ? { store: false } : {}),
+    ...(getConfig().forceStoreFalse ? { store: false } : {}),
   };
 }
 
 function applyModelMappingsToModelsPayload(payload: unknown) {
-  if (!isJsonRecord(payload) || !Array.isArray(payload.data) || Object.keys(_liveConfig.modelMappings).length === 0) {
+  if (!isJsonRecord(payload) || !Array.isArray(payload.data) || Object.keys(getConfig().modelMappings).length === 0) {
     return { payload, aliasCount: 0 };
   }
 
@@ -1172,7 +1179,7 @@ function applyModelMappingsToModelsPayload(payload: unknown) {
   }
 
   let aliasCount = 0;
-  for (const [alias, target] of Object.entries(_liveConfig.modelMappings)) {
+  for (const [alias, target] of Object.entries(getConfig().modelMappings)) {
     if (existingIds.has(alias)) {
       continue;
     }
@@ -1359,7 +1366,7 @@ async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   controller: AbortController,
-  connectTimeoutMs = _liveConfig.upstreamTimeoutMs,
+  connectTimeoutMs = getConfig().upstreamTimeoutMs,
 ) {
   const timeout = setTimeout(() => {
     abortWithReason(controller, { kind: 'timeout', phase: 'connect' });
@@ -1413,7 +1420,7 @@ async function fetchResponsesUpstream(
   budget: FallbackBudget,
   startIndex = 0,
 ): Promise<UpstreamAttempt> {
-  const endpoints = _liveConfig.responsesEndpoints;
+  const endpoints = getConfig().responsesEndpoints;
   const connectTimeoutMs = getResponsesConnectTimeoutMs(streamResponse);
 
   const boundedStartIndex = Math.max(0, Math.min(startIndex, endpoints.length));
@@ -1436,9 +1443,9 @@ async function fetchResponsesUpstream(
         fallbackName: endpoint.name,
         fallbackUrl: endpoint.url,
         attempt: index,
-        totalFallbacks: _liveConfig.fallbackEndpoints.length,
+        totalFallbacks: getConfig().fallbackEndpoints.length,
         fallbackAttemptsUsed: budget.attemptsUsed,
-        fallbackBudgetRemainingMs: _liveConfig.maxFallbackTotalMs > 0 ? Math.max(0, _liveConfig.maxFallbackTotalMs - (Date.now() - budget.startedAt)) : null,
+        fallbackBudgetRemainingMs: getConfig().maxFallbackTotalMs > 0 ? Math.max(0, getConfig().maxFallbackTotalMs - (Date.now() - budget.startedAt)) : null,
         endpointHealth: getEndpointHealthSnapshot(endpoint),
       });
     }
@@ -1537,10 +1544,10 @@ async function fetchResponsesUpstream(
       : undefined;
 
     const fallbackReason = getUpstreamFallbackReason(response.status, parsedErrorPayload, {
-      fallbackOnRetryable4xx: _liveConfig.fallbackOnRetryable4xx,
-      fallbackOnCompat4xx: _liveConfig.fallbackOnCompat4xx,
-      compatFallbackPatterns: _liveConfig.compatFallbackPatterns,
-      clientErrorPatterns: _liveConfig.clientErrorPatterns,
+      fallbackOnRetryable4xx: getConfig().fallbackOnRetryable4xx,
+      fallbackOnCompat4xx: getConfig().fallbackOnCompat4xx,
+      compatFallbackPatterns: getConfig().compatFallbackPatterns,
+      clientErrorPatterns: getConfig().clientErrorPatterns,
     });
 
     if (!fallbackReason) {
@@ -1550,8 +1557,8 @@ async function fetchResponsesUpstream(
         upstreamStatus: response.status,
         upstreamContentType,
         errorPreview,
-        fallbackOnRetryable4xx: _liveConfig.fallbackOnRetryable4xx,
-        fallbackOnCompat4xx: _liveConfig.fallbackOnCompat4xx,
+        fallbackOnRetryable4xx: getConfig().fallbackOnRetryable4xx,
+        fallbackOnCompat4xx: getConfig().fallbackOnCompat4xx,
       });
       return {
         endpoint,
@@ -1609,7 +1616,7 @@ async function fetchResponsesUpstream(
 async function readResponseText(
   upstreamResponse: Response,
   controller: AbortController,
-  firstChunkTimeoutMs = _liveConfig.firstByteTimeoutMs,
+  firstChunkTimeoutMs = getConfig().firstByteTimeoutMs,
 ): Promise<string> {
   if (!upstreamResponse.body) {
     return '';
@@ -1628,7 +1635,7 @@ async function readResponseText(
 
     bodyTimer = setTimeout(() => {
       abortWithReason(controller, { kind: 'timeout', phase });
-    }, phase === 'first-byte' ? firstChunkTimeoutMs : _liveConfig.streamIdleTimeoutMs);
+    }, phase === 'first-byte' ? firstChunkTimeoutMs : getConfig().streamIdleTimeoutMs);
   };
 
   resetBodyTimer('first-byte');
@@ -1700,7 +1707,7 @@ async function probeAndPipeResponsesTextStream(
   let wroteAnyEvent = false;
   let wroteTextContent = false;
   let textCharCount = 0;
-  const enforceFirstTextTimeout = _liveConfig.firstTextTimeoutMs > 0;
+  const enforceFirstTextTimeout = getConfig().firstTextTimeoutMs > 0;
 
   const ensureSseHeaders = () => {
     if (res.headersSent) {
@@ -1731,7 +1738,7 @@ async function probeAndPipeResponsesTextStream(
 
     streamTimer = setTimeout(() => {
       abortWithReason(controller, { kind: 'timeout', phase });
-    }, phase === 'first-byte' ? _liveConfig.firstByteTimeoutMs : _liveConfig.streamIdleTimeoutMs);
+    }, phase === 'first-byte' ? getConfig().firstByteTimeoutMs : getConfig().streamIdleTimeoutMs);
   };
 
   const clearFirstTextTimer = () => {
@@ -1748,7 +1755,7 @@ async function probeAndPipeResponsesTextStream(
 
     firstTextTimer = setTimeout(() => {
       abortWithReason(controller, { kind: 'timeout', phase: 'first-text' });
-    }, _liveConfig.firstTextTimeoutMs);
+    }, getConfig().firstTextTimeoutMs);
   };
 
   const flushPendingBlocks = () => {
@@ -2049,7 +2056,7 @@ async function pipeUpstreamSse(
   let streamEventCount = 0;
   let streamTimer: ReturnType<typeof setTimeout> | undefined;
   let firstTextTimer: ReturnType<typeof setTimeout> | undefined;
-  const enforceFirstTextTimeout = _liveConfig.firstTextTimeoutMs > 0 && streamMode === 'normalized';
+  const enforceFirstTextTimeout = getConfig().firstTextTimeoutMs > 0 && streamMode === 'normalized';
 
   const resetStreamTimer = (phase: 'first-byte' | 'idle') => {
     if (streamTimer) {
@@ -2058,7 +2065,7 @@ async function pipeUpstreamSse(
 
     streamTimer = setTimeout(() => {
       abortWithReason(controller, { kind: 'timeout', phase });
-    }, phase === 'first-byte' ? _liveConfig.firstByteTimeoutMs : _liveConfig.streamIdleTimeoutMs);
+    }, phase === 'first-byte' ? getConfig().firstByteTimeoutMs : getConfig().streamIdleTimeoutMs);
   };
 
   const clearFirstTextTimer = () => {
@@ -2075,7 +2082,7 @@ async function pipeUpstreamSse(
 
     firstTextTimer = setTimeout(() => {
       abortWithReason(controller, { kind: 'timeout', phase: 'first-text' });
-    }, _liveConfig.firstTextTimeoutMs);
+    }, getConfig().firstTextTimeoutMs);
   };
 
   resetStreamTimer('first-byte');
@@ -2334,9 +2341,10 @@ async function pipeUpstreamSse(
   };
 }
 
-const server = createServer(async (req, res) => {
-  _liveConfig = runtimeStore.getSnapshot().config;
-  const runtimeVersion = runtimeStore.getSnapshot().runtimeVersion;
+const server = createServer((req, res) => {
+  const _snap = runtimeStore.getSnapshot();
+  _requestContext.run(_snap, async () => {
+  const runtimeVersion = _snap.runtimeVersion;
 
   const {
     apiKey,
@@ -2387,7 +2395,7 @@ const server = createServer(async (req, res) => {
     upstreamModelsUrl,
     upstreamTimeoutMs,
     upstreamUrl,
-  } = _liveConfig;
+  } = _snap.config;
 
   const requestId = createRequestId();
   const startedAt = Date.now();
@@ -3578,12 +3586,13 @@ const server = createServer(async (req, res) => {
       activeRequests -= 1;
     }
   }
+  });
 });
 
-const _initConfig = runtimeStore.getSnapshot().config;
 
-server.listen(_initConfig.port, _initConfig.host, () => {
-  const c = _liveConfig;
+
+server.listen(_initialSnapshot.config.port, _initialSnapshot.config.host, () => {
+  const c = _initialSnapshot.config;
   console.log(`Instance: ${c.instanceName}`);
   console.log(`JSON proxy listening on http://${c.host}:${c.port}`);
   console.log(`Primary provider: ${c.primaryProviderName}`);
