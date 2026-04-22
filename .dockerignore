@@ -1,0 +1,11 @@
+node_modules/
+dist/
+logs/
+captures/
+sse-failures/
+.git/
+.superpowers/
+.worktrees/
+instances/proxy-*/
+instances/example-*/
+docs/superpowers/

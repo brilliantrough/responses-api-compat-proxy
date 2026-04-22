@@ -72,6 +72,45 @@ Open the local admin pages:
 
 For the full first-run workflow, see `docs/quickstart.md`.
 
+## Docker Quick Start
+
+Docker does not need systemd for this project. The container runs the proxy directly as a single foreground process.
+
+Prepare a local runtime instance directory first:
+
+```bash
+cp -r instances/example-11234 instances/proxy-11234
+cp instances/proxy-11234/.env.example instances/proxy-11234/.env
+cp instances/proxy-11234/fallback.json.example instances/proxy-11234/fallback.json
+cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.json
+```
+
+Edit `instances/proxy-11234/.env` and fill your provider credentials, then start the container:
+
+```bash
+docker compose up --build
+```
+
+The compose example:
+
+- mounts `instances/proxy-11234/` into the container,
+- publishes `127.0.0.1:${DOCKER_PROXY_PORT:-11234}`,
+- enables Docker-specific host access for `/admin` with `PROXY_ADMIN_ALLOW_HOST=1`.
+
+If `11234` is already in use on your host, pick another host port:
+
+```bash
+DOCKER_PROXY_PORT=11334 docker compose up --build
+```
+
+After startup, these endpoints are available from the host:
+
+- `http://127.0.0.1:<host-port>/v1/responses`
+- `http://127.0.0.1:<host-port>/admin`
+- `http://127.0.0.1:<host-port>/admin/monitor`
+
+Keep the published admin-capable port on a trusted host or behind additional protection if you change the port binding away from `127.0.0.1`.
+
 ## Example Requests
 
 Minimal non-streaming request:
@@ -110,6 +149,7 @@ The built-in admin UI is available at `http://127.0.0.1:<PORT>/admin`.
 - `docs/configuration.md` - required fields, recommended values, advanced knobs.
 - `docs/streaming-compatibility.md` - SSE behavior, raw vs normalized mode, timeout phases.
 - `docs/operations.md` - multi-instance layout, systemd, admin workflow, safe restarts.
+- `Dockerfile` and `docker-compose.yaml` - container build and local Docker deployment.
 - `docs/publishing-checklist.md` - final pre-push checklist before publishing to a public remote.
 
 ## Repository Layout

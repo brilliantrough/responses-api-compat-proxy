@@ -1,0 +1,14 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./instances/proxy-11234/.env
+    environment:
+      PROXY_ADMIN_ALLOW_HOST: "1"
+    ports:
+      - "127.0.0.1:${DOCKER_PROXY_PORT:-11234}:11234"
+    volumes:
+      - ./instances/proxy-11234:/app/instances/proxy-11234

@@ -17,6 +17,12 @@ export function isLocalhost(remoteAddress: string | undefined): boolean {
   return remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
 }
 
+export function isAllowedAdminAccess(remoteAddress: string | undefined, allowHost: boolean): boolean {
+  if (isLocalhost(remoteAddress)) return true;
+  if (allowHost && remoteAddress) return true;
+  return false;
+}
+
 function sendJson(res: ServerResponse, statusCode: number, body: unknown) {
   if (res.writableEnded || res.destroyed) return;
   if (res.headersSent) {
@@ -108,7 +114,7 @@ export function createAdminHandler(options: AdminHandlerOptions) {
 
     if (url !== '/admin' && !url.startsWith('/admin/')) return false;
 
-    if (!isLocalhost(getRemoteAddress(req))) {
+    if (!isAllowedAdminAccess(getRemoteAddress(req), runtimeStore.getSnapshot().config.adminAllowHost)) {
       sendJson(res, 403, { error: { message: 'Admin endpoints are only accessible from localhost', type: 'forbidden' } });
       return true;
     }

@@ -7,7 +7,7 @@ import path from 'node:path';
 
 import { createConfigFileStoreFromPaths } from '../src/config-files.js';
 import { createRuntimeConfigStore } from '../src/runtime-config.js';
-import { createAdminHandler, isLocalhost } from '../src/admin-api.js';
+import { createAdminHandler, isAllowedAdminAccess, isLocalhost } from '../src/admin-api.js';
 
 const allTempDirs: string[] = [];
 const allServers: import('node:http').Server[] = [];
@@ -63,6 +63,11 @@ async function main() {
     assert.equal(isLocalhost('192.168.1.1'), false);
     assert.equal(isLocalhost(undefined), false);
     assert.equal(isLocalhost('10.0.0.1'), false);
+    assert.equal(isAllowedAdminAccess('127.0.0.1', false), true);
+    assert.equal(isAllowedAdminAccess('::ffff:127.0.0.1', false), true);
+    assert.equal(isAllowedAdminAccess('172.17.0.1', false), false);
+    assert.equal(isAllowedAdminAccess('172.17.0.1', true), true);
+    assert.equal(isAllowedAdminAccess(undefined, true), false);
 
     // Use two separate dirs: envDir has .env, configDir has fallback.json + model-map.json.
     // This proves the store uses explicit paths from runtime snapshot, not guessed from .env dir.

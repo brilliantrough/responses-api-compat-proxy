@@ -13,6 +13,7 @@ export type UpstreamEndpoint = {
 export type ProxyRuntimeConfig = {
   host: string;
   port: number;
+  adminAllowHost: boolean;
   instanceName: string;
   primaryProviderName: string;
   primaryProviderBaseUrl: string;
@@ -293,6 +294,12 @@ function loadModelMappings(modelMappingPath: string) {
 export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): ProxyRuntimeConfig {
   const host = env.HOST ?? '0.0.0.0';
   const port = Number(env.PORT ?? 11234);
+  const adminAllowHost = isEnabled(env.PROXY_ADMIN_ALLOW_HOST);
+  if (adminAllowHost) {
+    console.warn(
+      'PROXY_ADMIN_ALLOW_HOST is enabled: /admin endpoints will accept non-localhost requests. Keep the published port bound to a trusted host or add external protection.',
+    );
+  }
   const instanceName = env.INSTANCE_NAME ?? `responses-proxy-${port}`;
   const primaryProviderName = env.PRIMARY_PROVIDER_NAME ?? 'primary-provider';
   const primaryProviderBaseUrl = normalizeBaseUrl(env.PRIMARY_PROVIDER_BASE_URL ?? 'https://primary.example');
@@ -359,6 +366,7 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
   return {
     host,
     port,
+    adminAllowHost,
     instanceName,
     primaryProviderName,
     primaryProviderBaseUrl,

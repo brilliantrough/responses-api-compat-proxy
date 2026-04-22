@@ -62,6 +62,7 @@ Most users should leave these alone on the first run.
 | `HOST` | `0.0.0.0` | Listener host. |
 | `INSTANCE_NAME` | `responses-proxy-${PORT}` | Logical instance name for logs, captures, and admin output. |
 | `PROXY_ENV_PATH` | `.env` | `.env` file used by startup and admin editing. |
+| `PROXY_ADMIN_ALLOW_HOST` | `0` | Allow non-localhost admin access when explicitly enabled, intended for Docker-style host access. |
 | `FALLBACK_CONFIG_PATH` | `config.json` | Fallback provider JSON path. |
 | `MODEL_MAP_PATH` | `model-map.json` | Model mapping JSON path. |
 | `PROXY_MAX_CONCURRENT_REQUESTS` | `512` | Maximum active proxy requests before overload rejection. |
@@ -69,6 +70,8 @@ Most users should leave these alone on the first run.
 | `PROXY_FORCE_STORE_FALSE` | `0` | Inject `store: false` for upstream compatibility. |
 
 The tracked example directories under `instances/example-*` are templates. Real deployments should copy them to gitignored runtime files such as `instances/proxy-11234/.env`, `instances/proxy-11234/fallback.json`, and `instances/proxy-11234/model-map.json`.
+
+`PROXY_ADMIN_ALLOW_HOST=1` is mainly intended for Docker deployments that publish the proxy to `127.0.0.1` on the host and want the host browser to access `/admin`. Leave it disabled for the default localhost-only admin behavior.
 
 ### Timeout Settings
 

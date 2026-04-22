@@ -15,6 +15,7 @@ Before pushing this repository to a public remote, review `docs/publishing-check
 - [Health and Admin Endpoints](#health-and-admin-endpoints)
 - [Local Admin UI](#local-admin-ui)
 - [Logs and Captures — Ignored Directories](#logs-and-captures--ignored-directories)
+- [Docker Deployment](#docker-deployment)
 - [Safe Restart Pattern](#safe-restart-pattern)
 - [Systemd Template](#systemd-template)
 - [Migration from Local Working Directory](#migration-from-local-working-directory)
@@ -286,6 +287,81 @@ PROXY_STREAM_MISSING_USAGE_DEBUG=0
 PROXY_STREAM_MISSING_USAGE_DIR=captures/proxy-11234/stream/missing-usage
 PROXY_STREAM_MODE=normalized
 ```
+
+---
+
+## Docker Deployment
+
+Docker is the simplest public deployment path for this project. It does not require systemd inside the container because the container runs the proxy directly as its single foreground process.
+
+### Prepare a Runtime Instance Directory
+
+Reuse the same runtime instance layout used by the non-Docker path:
+
+```bash
+cp -r instances/example-11234 instances/proxy-11234
+cp instances/proxy-11234/.env.example instances/proxy-11234/.env
+cp instances/proxy-11234/fallback.json.example instances/proxy-11234/fallback.json
+cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.json
+```
+
+Edit `instances/proxy-11234/.env` and fill:
+
+```env
+PRIMARY_PROVIDER_NAME=primary-provider
+PRIMARY_PROVIDER_BASE_URL=https://provider.example
+PRIMARY_PROVIDER_API_KEY=your_api_key_here
+PROXY_ENV_PATH=./instances/proxy-11234/.env
+FALLBACK_CONFIG_PATH=./instances/proxy-11234/fallback.json
+MODEL_MAP_PATH=./instances/proxy-11234/model-map.json
+```
+
+### Start Docker Compose
+
+```bash
+docker compose up --build
+```
+
+The provided `docker-compose.yaml`:
+
+- builds the local `Dockerfile`,
+- loads env values from `./instances/proxy-11234/.env`,
+- mounts `./instances/proxy-11234` into the container at `/app/instances/proxy-11234`,
+- publishes `127.0.0.1:${DOCKER_PROXY_PORT:-11234}:11234`,
+- sets `PROXY_ADMIN_ALLOW_HOST=1` so the host can reach `/admin` through the mapped port.
+
+If `11234` is already in use on the host, override the published host port:
+
+```bash
+DOCKER_PROXY_PORT=11334 docker compose up --build
+```
+
+### Access from the Host
+
+After startup:
+
+- API: `http://127.0.0.1:<host-port>/v1/responses`
+- Config UI: `http://127.0.0.1:<host-port>/admin`
+- Provider monitor: `http://127.0.0.1:<host-port>/admin/monitor`
+
+### Logs and Lifecycle
+
+Use Docker rather than systemd commands:
+
+```bash
+docker compose logs -f
+docker compose down
+```
+
+### Editing Mounted Config
+
+The admin UI writes to the mounted runtime files. Changes made through `/admin` persist back to the host files under `instances/proxy-11234/` because that directory is mounted read-write.
+
+### Admin Access Safety
+
+`PROXY_ADMIN_ALLOW_HOST=1` is intended only for Docker-style host access through the published port. It should remain an explicit opt-in.
+
+The provided compose file binds the service to `127.0.0.1`, which keeps `/admin` reachable only from the host machine. If you change the port binding to `0.0.0.0` or publish it more broadly, you are also exposing admin access more broadly and should add additional protections.
 
 ---
 
