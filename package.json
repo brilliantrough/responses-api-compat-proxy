@@ -24,7 +24,8 @@
     "loadtest": "tsx tools/load-test-proxy.ts",
     "check:config-files": "tsx checks/check-config-files.ts",
     "check:runtime-reload": "tsx checks/check-runtime-reload.ts",
-    "check:admin-config-api": "tsx checks/check-admin-config-api.ts"
+    "check:admin-config-api": "tsx checks/check-admin-config-api.ts",
+    "check:admin-model-reload": "tsx checks/check-admin-model-reload.ts"
   },
   "dependencies": {
     "@ai-sdk/open-responses": "^1.0.6",
