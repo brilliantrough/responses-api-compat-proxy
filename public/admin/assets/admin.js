@@ -11,6 +11,8 @@
   var draftFallback = [];
   var draftModelMappings = {};
   var dirty = false;
+  var draggingFallbackIndex = -1;
+  var armedFallbackDragIndex = -1;
 
   var RUNTIME_KEYS = [
     'PORT', 'HOST', 'INSTANCE_NAME', 'PROXY_STREAM_MODE',
@@ -29,6 +31,64 @@
     var d = document.createElement('div');
     d.textContent = s;
     return d.innerHTML;
+  }
+
+  function appendHelperText(container, text) {
+    if (!text) return;
+    var helperEl = document.createElement('div');
+    helperEl.className = 'field-helper';
+    helperEl.textContent = text;
+    container.appendChild(helperEl);
+  }
+
+  function getEnvHelperText(key) {
+    var helpers = {
+      PRIMARY_PROVIDER_BASE_URL: 'Base URL that must expose /v1/responses and /v1/models.',
+      PRIMARY_PROVIDER_API_KEY: 'Stored in .env and masked in this UI.',
+      PRIMARY_PROVIDER_DEFAULT_MODEL: 'Used as the default upstream model for quick testing.',
+      PROXY_ENV_PATH: 'Admin reads and writes this .env file path.',
+      FALLBACK_CONFIG_PATH: 'JSON file saved when fallback providers are updated.',
+      MODEL_MAP_PATH: 'JSON file saved when model mappings are updated.'
+    };
+    return helpers[key] || '';
+  }
+
+  function getFallbackHelperText(field) {
+    var helpers = {
+      name: 'Shown in stats and cooldown state.',
+      baseUrl: 'Base URL used for /v1/responses and /v1/models.',
+      apiKeyMode: 'env reads a variable name; inline stores a masked secret in config.',
+      apiKeyEnv: 'Variable name read from .env at runtime.'
+    };
+    return helpers[field] || '';
+  }
+
+  function getModelMappingHelperText(kind) {
+    if (kind === 'alias') return 'Client-facing model name accepted by the proxy.';
+    if (kind === 'target') return 'Actual upstream model sent after mapping.';
+    return '';
+  }
+
+  function createFieldStack(control, helperText) {
+    var stack = document.createElement('div');
+    stack.className = 'field-stack';
+    stack.appendChild(control);
+    appendHelperText(stack, helperText);
+    return stack;
+  }
+
+  function removeFallbackProvider(index) {
+    draftFallback.splice(index, 1);
+    renderFallbackProviders();
+    checkDirty();
+  }
+
+  function moveFallbackProvider(fromIndex, toIndex) {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
+    var moved = draftFallback.splice(fromIndex, 1)[0];
+    draftFallback.splice(toIndex, 0, moved);
+    renderFallbackProviders();
+    checkDirty();
   }
 
   function setStatus(text, isError) {
@@ -138,7 +198,7 @@
           checkDirty();
         });
       }
-      tdVal.appendChild(input);
+      tdVal.appendChild(createFieldStack(input, getEnvHelperText(e.key)));
       tr.appendChild(tdVal);
       var tdSecret = document.createElement('td');
       tdSecret.textContent = e.secret ? 'Yes' : 'No';
@@ -150,31 +210,85 @@
   function renderFallbackProviders() {
     var tbody = document.querySelector('#fallback-table tbody');
     tbody.innerHTML = '';
+    if (draftFallback.length === 0) {
+      var emptyTr = document.createElement('tr');
+      var emptyTd = document.createElement('td');
+      emptyTd.colSpan = 7;
+      emptyTd.className = 'loading';
+      emptyTd.textContent = 'No fallback providers in the current draft.';
+      emptyTr.appendChild(emptyTd);
+      tbody.appendChild(emptyTr);
+      return;
+    }
     for (var i = 0; i < draftFallback.length; i++) {
-      var p = draftFallback[i];
+      (function(index) {
+      var p = draftFallback[index];
       var tr = document.createElement('tr');
+      tr.setAttribute('draggable', 'true');
+      tr.addEventListener('dragstart', function(event) {
+        if (armedFallbackDragIndex !== index) {
+          event.preventDefault();
+          return;
+        }
+        draggingFallbackIndex = index;
+        tr.classList.add('is-dragging');
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', String(index));
+        }
+      });
+      tr.addEventListener('dragover', function(event) {
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      });
+      tr.addEventListener('drop', function(event) {
+        event.preventDefault();
+        moveFallbackProvider(draggingFallbackIndex, index);
+      });
+      tr.addEventListener('dragend', function() {
+        draggingFallbackIndex = -1;
+        armedFallbackDragIndex = -1;
+        tr.classList.remove('is-dragging');
+      });
+
+      var tdMove = document.createElement('td');
+      tdMove.className = 'drag-cell';
+      var handle = document.createElement('button');
+      handle.type = 'button';
+      handle.className = 'drag-handle';
+      handle.textContent = '::';
+      handle.title = 'Drag to reorder';
+      handle.addEventListener('mousedown', function() {
+        armedFallbackDragIndex = index;
+      });
+      handle.addEventListener('mouseup', function() {
+        armedFallbackDragIndex = -1;
+      });
+      tdMove.appendChild(handle);
+      tr.appendChild(tdMove);
+
       var tdName = document.createElement('td');
       var nameInput = document.createElement('input');
       nameInput.type = 'text';
       nameInput.value = p.name;
-      nameInput.dataset.idx = i;
+      nameInput.dataset.idx = index;
       nameInput.addEventListener('input', function() {
         draftFallback[parseInt(this.dataset.idx)].name = this.value;
         checkDirty();
       });
-      tdName.appendChild(nameInput);
+      tdName.appendChild(createFieldStack(nameInput, getFallbackHelperText('name')));
       tr.appendChild(tdName);
 
       var tdUrl = document.createElement('td');
       var urlInput = document.createElement('input');
       urlInput.type = 'text';
       urlInput.value = p.baseUrl;
-      urlInput.dataset.idx = i;
+      urlInput.dataset.idx = index;
       urlInput.addEventListener('input', function() {
         draftFallback[parseInt(this.dataset.idx)].baseUrl = this.value;
         checkDirty();
       });
-      tdUrl.appendChild(urlInput);
+      tdUrl.appendChild(createFieldStack(urlInput, getFallbackHelperText('baseUrl')));
       tr.appendChild(tdUrl);
 
       var tdMode = document.createElement('td');
@@ -186,7 +300,7 @@
         if (p.apiKeyMode === m) opt.selected = true;
         modeSelect.appendChild(opt);
       });
-      modeSelect.dataset.idx = i;
+      modeSelect.dataset.idx = index;
       modeSelect.addEventListener('change', function() {
         var idx = parseInt(this.dataset.idx);
         draftFallback[idx].apiKeyMode = this.value;
@@ -199,7 +313,7 @@
         renderFallbackProviders();
         checkDirty();
       });
-      tdMode.appendChild(modeSelect);
+      tdMode.appendChild(createFieldStack(modeSelect, getFallbackHelperText('apiKeyMode')));
       tr.appendChild(tdMode);
 
       var tdEnv = document.createElement('td');
@@ -207,18 +321,20 @@
         var envInput = document.createElement('input');
         envInput.type = 'text';
         envInput.value = p.apiKeyEnv || '';
-        envInput.dataset.idx = i;
+        envInput.dataset.idx = index;
         envInput.addEventListener('input', function() {
           draftFallback[parseInt(this.dataset.idx)].apiKeyEnv = this.value;
           checkDirty();
         });
-        tdEnv.appendChild(envInput);
+        tdEnv.appendChild(createFieldStack(envInput, getFallbackHelperText('apiKeyEnv')));
       } else if (p.apiKeyMode === 'inline') {
+        var inlineStack = document.createElement('div');
+        inlineStack.className = 'field-stack';
         var inlinePwd = document.createElement('input');
         inlinePwd.type = 'password';
         inlinePwd.placeholder = '*** (masked)';
         inlinePwd.value = '';
-        inlinePwd.dataset.idx = i;
+        inlinePwd.dataset.idx = index;
         inlinePwd.addEventListener('input', function() {
           var idx = parseInt(this.dataset.idx);
           if (this.value) {
@@ -230,7 +346,7 @@
           }
           checkDirty();
         });
-        tdEnv.appendChild(inlinePwd);
+        inlineStack.appendChild(inlinePwd);
 
         var actionSel = document.createElement('select');
         actionSel.style.marginTop = '0.3rem';
@@ -241,7 +357,7 @@
           if ((p.secretAction || 'keep') === a) opt.selected = true;
           actionSel.appendChild(opt);
         });
-        actionSel.dataset.idx = i;
+        actionSel.dataset.idx = index;
         actionSel.addEventListener('change', function() {
           var idx = parseInt(this.dataset.idx);
           var action = this.value;
@@ -260,7 +376,11 @@
         actionLabel.style.marginTop = '0.2rem';
         actionLabel.textContent = 'Action:';
         actionLabel.appendChild(actionSel);
-        tdEnv.appendChild(actionLabel);
+        inlineStack.appendChild(actionLabel);
+        appendHelperText(inlineStack, 'Inline mode keeps a masked secret in config until you save.');
+        tdEnv.appendChild(inlineStack);
+      } else {
+        appendHelperText(tdEnv, 'No secret configured for this fallback row.');
       }
       tr.appendChild(tdEnv);
 
@@ -268,7 +388,23 @@
       tdConf.textContent = p.apiKeyConfigured ? 'Yes' : 'No';
       tr.appendChild(tdConf);
 
+      var tdActions = document.createElement('td');
+      var actions = document.createElement('div');
+      actions.className = 'row-actions';
+      var deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'danger icon-button';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.dataset.idx = index;
+      deleteBtn.addEventListener('click', function() {
+        removeFallbackProvider(parseInt(this.dataset.idx, 10));
+      });
+      actions.appendChild(deleteBtn);
+      tdActions.appendChild(actions);
+      tr.appendChild(tdActions);
+
       tbody.appendChild(tr);
+      })(i);
     }
   }
 
@@ -280,6 +416,8 @@
       (function(alias, idx) {
         var row = document.createElement('div');
         row.className = 'kv-row';
+        var aliasCol = document.createElement('div');
+        aliasCol.className = 'kv-col';
         var aliasInput = document.createElement('input');
         aliasInput.type = 'text';
         aliasInput.value = alias;
@@ -294,12 +432,17 @@
           this.dataset.origAlias = newAlias;
           checkDirty();
         });
-        row.appendChild(aliasInput);
+        aliasCol.appendChild(aliasInput);
+        appendHelperText(aliasCol, getModelMappingHelperText('alias'));
+        row.appendChild(aliasCol);
 
         var arrow = document.createElement('span');
+        arrow.className = 'kv-arrow';
         arrow.textContent = ' \u2192 ';
         row.appendChild(arrow);
 
+        var targetCol = document.createElement('div');
+        targetCol.className = 'kv-col';
         var targetInput = document.createElement('input');
         targetInput.type = 'text';
         targetInput.value = draftModelMappings[alias];
@@ -309,7 +452,9 @@
           draftModelMappings[this.dataset.origAlias] = this.value;
           checkDirty();
         });
-        row.appendChild(targetInput);
+        targetCol.appendChild(targetInput);
+        appendHelperText(targetCol, getModelMappingHelperText('target'));
+        row.appendChild(targetCol);
 
         var delBtn = document.createElement('button');
         delBtn.textContent = 'x';

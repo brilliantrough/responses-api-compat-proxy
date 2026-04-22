@@ -41,3 +41,13 @@ button.warning:hover { background: #ef6c00; }
 .kv-row input { flex: 1; }
 .kv-row button { flex: none; padding: 0.3rem 0.6rem; }
 .loading { color: #888; font-style: italic; }
+.field-helper { margin-top: 0.25rem; font-size: 0.75rem; color: #777; line-height: 1.35; }
+.field-stack { display: flex; flex-direction: column; gap: 0.1rem; }
+.row-actions { display: flex; justify-content: flex-end; }
+.icon-button { padding: 0.25rem 0.55rem; font-size: 0.8rem; }
+.drag-cell { width: 1%; white-space: nowrap; }
+.drag-handle { cursor: grab; min-width: 2rem; padding: 0.2rem 0.45rem; font-family: monospace; }
+.drag-handle:active { cursor: grabbing; }
+#fallback-table tr.is-dragging { opacity: 0.55; background: #e3f2fd; }
+.kv-col { flex: 1; display: flex; flex-direction: column; gap: 0.1rem; }
+.kv-arrow { color: #777; }
