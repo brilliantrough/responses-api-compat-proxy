@@ -1,4 +1,43 @@
-body { font-family: monospace; margin: 2rem; background: #fafafa; color: #222; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; margin: 0; background: #f5f5f5; color: #222; font-size: 14px; }
 h1 { font-size: 1.4rem; }
-#status { margin: 1rem 0; color: #555; }
-#config-output { white-space: pre; background: #fff; border: 1px solid #ddd; padding: 1rem; overflow-x: auto; }
+#status { margin: 1rem 0; color: #555; padding: 0.5rem 1rem; background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 4px; }
+#status.error { background: #ffebee; border-color: #ef9a9a; color: #c62828; }
+.container { max-width: 960px; margin: 0 auto; padding: 1rem; }
+.section { background: #fff; border: 1px solid #ddd; border-radius: 4px; margin: 1rem 0; }
+.section-header { background: #f0f0f0; padding: 0.5rem 1rem; font-weight: bold; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
+.section-body { padding: 1rem; }
+.section-body table { width: 100%; border-collapse: collapse; }
+.section-body th, .section-body td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid #eee; }
+.section-body th { font-weight: 600; color: #555; font-size: 0.85rem; }
+.section-body td input, .section-body td select { font-family: monospace; font-size: 0.9rem; padding: 0.2rem 0.4rem; border: 1px solid #ccc; border-radius: 3px; width: 100%; box-sizing: border-box; }
+.section-body td input:focus, .section-body td select:focus { outline: none; border-color: #1976d2; box-shadow: 0 0 0 2px rgba(25,118,210,0.15); }
+.section-body td input[readonly] { background: #f5f5f5; color: #888; }
+.field-group { margin: 0.5rem 0; }
+.field-group label { display: block; font-size: 0.85rem; font-weight: 600; color: #555; margin-bottom: 0.2rem; }
+.field-group input, .field-group select { font-family: monospace; font-size: 0.9rem; padding: 0.3rem 0.5rem; border: 1px solid #ccc; border-radius: 3px; width: 100%; box-sizing: border-box; }
+.badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem; font-weight: 600; }
+.badge-dirty { background: #fff3e0; color: #e65100; border: 1px solid #ffb74d; }
+.badge-ok { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+.badge-restart { background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
+.notice-restart { background: #fff3e0; border: 1px solid #ffb74d; color: #e65100; padding: 0.5rem 1rem; border-radius: 4px; margin: 0.5rem 0; font-weight: 600; }
+.notice-error { background: #ffebee; border: 1px solid #ef9a9a; color: #c62828; padding: 0.5rem 1rem; border-radius: 4px; margin: 0.5rem 0; }
+.notice-success { background: #e8f5e9; border: 1px solid #a5d6a7; color: #2e7d32; padding: 0.5rem 1rem; border-radius: 4px; margin: 0.5rem 0; }
+.btn-row { margin: 0.5rem 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+button { font-family: inherit; font-size: 0.85rem; padding: 0.4rem 1rem; border: 1px solid #bbb; border-radius: 4px; cursor: pointer; background: #fafafa; }
+button:hover { background: #eee; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.primary { background: #1976d2; color: #fff; border-color: #1565c0; }
+button.primary:hover { background: #1565c0; }
+button.danger { background: #c62828; color: #fff; border-color: #b71c1c; }
+button.danger:hover { background: #b71c1c; }
+button.warning { background: #f57c00; color: #fff; border-color: #ef6c00; }
+button.warning:hover { background: #ef6c00; }
+.validation-result { margin: 0.5rem 0; padding: 0.5rem 1rem; border-radius: 4px; font-size: 0.85rem; }
+.validation-valid { background: #e8f5e9; border: 1px solid #a5d6a7; color: #2e7d32; }
+.validation-invalid { background: #ffebee; border: 1px solid #ef9a9a; color: #c62828; }
+.validation-errors { margin: 0.3rem 0; padding-left: 1.5rem; }
+.validation-errors li { margin: 0.2rem 0; }
+.kv-row { display: flex; gap: 0.5rem; align-items: center; margin: 0.3rem 0; }
+.kv-row input { flex: 1; }
+.kv-row button { flex: none; padding: 0.3rem 0.6rem; }
+.loading { color: #888; font-style: italic; }

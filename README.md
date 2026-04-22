@@ -14,6 +14,7 @@ This project is not an official OpenAI project. It is a compatibility and operat
 - Endpoint cooldown and lightweight circuit breaker behavior.
 - Prompt cache hint passthrough and default injection.
 - Lightweight admin endpoints for stats and cache clearing.
+- Local admin UI at `/admin` for inspecting and editing configuration.
 - Example multi-instance configuration layout.
 
 ## Quick Start
@@ -56,6 +57,18 @@ curl -N http://127.0.0.1:11234/v1/responses \
   -d '{"model":"my-model-v2","input":"Say hello.","stream":true}'
 ```
 
+## Admin UI
+
+The proxy includes a built-in admin UI accessible at `http://127.0.0.1:<PORT>/admin`. It provides a browser-based interface for inspecting and editing proxy configuration.
+
+- **Localhost only**: All `/admin` endpoints are restricted to `127.0.0.1` / `::1`. Remote requests receive `403 Forbidden`.
+- **Secret handling**: API keys and other secret values are never displayed in full. Secret fields show `***` and require explicit replacement when editing.
+- **Sections**: Overview, Providers (primary env fields and fallback table), Model Mappings, Runtime/Compatibility, and Review & Apply (Validate, Save, Reload, Rollback).
+- **Draft state**: Edits are tracked as a local draft. An "Unsaved changes" badge appears when the draft differs from the server config.
+- **Restart notice**: If `PORT` or `HOST` changes are detected, a restart-required notice is shown.
+
+See `docs/operations.md` for detailed usage of the admin UI workflow.
+
 ## Repository Layout
 
 - `src/` - production proxy source and Responses compatibility helpers.
@@ -64,6 +77,7 @@ curl -N http://127.0.0.1:11234/v1/responses \
 - `instances/` - safe example instance layouts.
 - `deploy/systemd/` - deployment templates.
 - `docs/` - configuration, streaming, and operations notes.
+- `public/admin/` - static admin UI (HTML, CSS, JS, no build step).
 
 ## Configuration
 
@@ -93,7 +107,7 @@ See `docs/operations.md` for multi-instance layout, systemd deployment, admin en
 
 Never commit real `.env` files, real instance directories, provider API keys, logs, captures, raw SSE failure dumps, or request bodies.
 
-The bundled admin endpoints are intended for local or trusted-network operation. Do not expose them directly to the public internet without adding authentication, authorization, and CORS restrictions.
+The bundled admin endpoints are intended for local or trusted-network operation. Do not expose them directly to the public internet without adding authentication, authorization, and CORS restrictions. The admin UI is restricted to localhost connections only and never displays full secret values.
 
 ## License
 

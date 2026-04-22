@@ -33,6 +33,10 @@ FALLBACK_CONFIG_PATH=./instances/example-11234/fallback.json.example
 MODEL_MAP_PATH=./instances/example-11234/model-map.json.example
 ```
 
+### Restart-Required Fields
+
+Changes to `PORT` or `HOST` are detected at runtime reload but require a full process restart to take effect. When the admin UI or reload endpoint detects these changes, `restartRequiredFields` will list the affected fields and the admin UI will display a restart-required notice. Other configuration changes (timeouts, model mappings, fallback providers) take effect immediately on reload without a restart.
+
 ## Fallback Providers
 
 Prefer `api_key_env` so secrets stay in environment files instead of JSON:
@@ -60,6 +64,26 @@ Model mappings rewrite the upstream request model while preserving the client-fa
   }
 }
 ```
+
+## Config File Paths and Admin Editing
+
+The proxy uses three config files controlled by environment variables:
+
+| File | Default Path | Env Variable | Editable via Admin |
+| --- | --- | --- | --- |
+| `.env` | `.env` | `PROXY_ENV_PATH` | Yes |
+| Fallback JSON | `config.json` | `FALLBACK_CONFIG_PATH` | Yes |
+| Model map JSON | `model-map.json` | `MODEL_MAP_PATH` | Yes |
+
+`PROXY_ENV_PATH` overrides the `.env` file location. When set, the admin config API reads from and writes to this path. The admin UI at `/admin` allows editing all three files through the browser (localhost only).
+
+### Secret Handling
+
+Environment keys containing `KEY`, `TOKEN`, or `SECRET` (case-insensitive) are treated as secrets:
+
+- **Read**: The `GET /admin/config` endpoint returns `***` for secret values, never the actual value.
+- **Edit**: In the admin UI, secret fields are displayed as masked password inputs. To change a secret, type the new value. To keep the existing secret, leave the field empty — the `secretAction: "keep"` default preserves the original value.
+- **Save**: The `PUT /admin/config` endpoint supports three secret actions: `keep` (preserve existing), `replace` (set new value), or `clear` (remove). If no action is specified for a secret field, `keep` is assumed.
 
 ## Runtime Reference
 

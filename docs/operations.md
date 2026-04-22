@@ -11,6 +11,7 @@ Deployment, process management, and operational procedures for the Responses API
 - [Build and Run Commands](#build-and-run-commands)
 - [Development Command](#development-command)
 - [Health and Admin Endpoints](#health-and-admin-endpoints)
+- [Local Admin UI](#local-admin-ui)
 - [Logs and Captures — Ignored Directories](#logs-and-captures--ignored-directories)
 - [Safe Restart Pattern](#safe-restart-pattern)
 - [Systemd Template](#systemd-template)
@@ -167,6 +168,78 @@ Looks up a previously cached response by ID. Returns `404` if not found.
 Main proxy endpoint. Accepts OpenAI Responses API requests and forwards to the configured upstream provider with normalization, fallback, and streaming support.
 
 **Warning:** These admin endpoints are intended for local or trusted-network operation. Do not expose them to the public internet without authentication and authorization.
+
+---
+
+## Local Admin UI
+
+The proxy includes a browser-based admin UI for inspecting and editing configuration at runtime. Access it at:
+
+```
+http://127.0.0.1:<PORT>/admin
+```
+
+### Localhost-Only Constraint
+
+All `/admin` endpoints (including the UI and API) are restricted to localhost connections (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`). Remote connections receive `403 Forbidden`. This constraint cannot be relaxed via configuration — if you need remote access, use an SSH tunnel or a local reverse proxy with authentication.
+
+### UI Sections
+
+The admin UI renders five sections:
+
+1. **Overview** — Runtime version, restart-required fields, instance name, and port.
+2. **Providers** — Primary provider environment fields (editable) and fallback provider table with name, base URL, API key mode, and configuration status.
+3. **Model Mappings** — Editable key-value rows for model alias-to-target mappings. Use the "+ Add Mapping" button to add new rows.
+4. **Runtime / Compatibility** — Read-only display of common runtime environment values (PORT, HOST, stream mode, timeouts, cache settings, etc.).
+5. **Review & Apply** — Action buttons: Validate, Save, Reload, Rollback.
+
+### Draft State and Dirty Indicator
+
+Edits in the UI are tracked as a local draft. When the draft differs from the server configuration, an "Unsaved changes" badge appears. Refreshing the page discards the draft and reloads the current server configuration.
+
+### Workflow
+
+#### Validate
+
+Click **Validate** to check the current draft without saving. The UI calls `POST /admin/config/validate` and displays validation results (valid or error list). No files are modified.
+
+#### Save
+
+Click **Save** to apply the draft:
+
+1. The UI calls `PUT /admin/config` with the draft payload.
+2. The server creates `.bak` backup files, writes the new configuration, and triggers a runtime reload.
+3. On success, the UI reloads the configuration from the server.
+4. If the reload detects `PORT` or `HOST` changes, a restart-required notice is displayed.
+
+Secret fields that were not changed use `secretAction: "keep"` to preserve existing values. Only secrets with explicit new values are replaced.
+
+#### Reload
+
+Click **Reload** to re-read configuration files from disk without saving UI changes. The UI calls `POST /admin/config/reload`. This is useful when config files have been edited manually outside the UI.
+
+#### Rollback
+
+Click **Rollback** to restore the `.bak` files created by the last save:
+
+1. The UI calls `POST /admin/config/rollback`.
+2. The server restores `.bak` files and triggers a reload.
+3. On success, the UI reloads the configuration from the server.
+
+If no `.bak` files exist, rollback succeeds with an empty restored list.
+
+### Restart-Required Notice
+
+When the runtime reload detects that `PORT` or `HOST` has changed (fields listed in `restartRequiredFields`), the admin UI shows a prominent restart-required notice. These changes take effect only after a full process restart (e.g., `systemctl restart`).
+
+### Error Handling
+
+API errors are displayed in the UI with a red notice. Common error scenarios:
+
+- **Save fails**: Config saved to disk but runtime reload failed. The proxy continues using the prior configuration.
+- **Rollback with no backups**: Returns success with an informational message; no files are restored.
+- **Invalid draft**: Validation lists specific field-level errors.
+- **Network/server errors**: Displayed with the error message from the API response.
 
 ---
 
