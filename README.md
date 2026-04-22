@@ -2,9 +2,11 @@
 
 [English](./README.md) | [中文](./docs/zh/README.md)
 
-A TypeScript proxy for exploring and operating against upstream providers that expose OpenAI-style `/v1/responses` and `/v1/models` endpoints.
+A TypeScript compatibility proxy for working with upstream providers that expose OpenAI-style `/v1/responses` and `/v1/models` endpoints.
 
-This project focuses on request compatibility, JSON and SSE response handling, fallback routing, stream normalization, runtime admin tooling, and prompt cache hint passthrough. It is not an official OpenAI project.
+It is designed for the real integration problems that show up after "OpenAI-compatible" stops being truly uniform: request normalization, JSON and SSE response handling, fallback routing, stream normalization, and runtime operations. It is not an official OpenAI project.
+
+Use it when direct upstream integration becomes painful because providers differ just enough to break assumptions around request shape, SSE event shape, timeout behavior, or day-2 operations like config edits and provider failover.
 
 ## What It Helps With
 
