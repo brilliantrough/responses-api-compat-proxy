@@ -1,7 +1,29 @@
 {
   "name": "responses-api-compat-proxy",
   "version": "0.1.0",
+  "description": "Compatibility proxy for OpenAI-style Responses API providers with SSE normalization, fallback routing, and local admin tools.",
   "private": false,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/brilliantrough/responses-api-compat-proxy.git"
+  },
+  "homepage": "https://github.com/brilliantrough/responses-api-compat-proxy#readme",
+  "bugs": {
+    "url": "https://github.com/brilliantrough/responses-api-compat-proxy/issues"
+  },
+  "keywords": [
+    "openai",
+    "responses-api",
+    "api-proxy",
+    "sse",
+    "streaming",
+    "typescript",
+    "ai-sdk",
+    "compatibility",
+    "fallback",
+    "admin-ui"
+  ],
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",

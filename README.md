@@ -131,4 +131,4 @@ The built-in admin UI is available at `http://127.0.0.1:<PORT>/admin`.
 
 ## License
 
-Add a license before publishing the repository.
+MIT. See `LICENSE`.
