@@ -39,6 +39,8 @@
     "check:sse": "tsx checks/check-sse-reconstruction.ts",
     "check:stream-first-text-timeout": "tsx checks/check-stream-first-text-timeout.ts",
     "check:stream-fallback": "tsx checks/check-stream-fallback.ts",
+    "check:stream-terminated-fallback": "tsx checks/check-stream-terminated-fallback.ts",
+    "check:fallback-exhausted": "tsx checks/check-fallback-exhausted.ts",
     "check:stream-no-false-fallback": "tsx checks/check-stream-no-false-fallback.ts",
     "proxy": "tsx src/json-proxy.ts",
     "proxy:dev": "tsx src/json-proxy.ts",
@@ -51,7 +53,8 @@
     "check:admin-model-reload-race": "tsx checks/check-admin-model-reload-race.ts",
     "check:admin-ui-smoke": "tsx checks/check-admin-ui-smoke.ts",
     "check:admin-snapshot-paths": "tsx checks/check-admin-snapshot-paths.ts",
-    "check:admin-monitor": "tsx checks/check-admin-monitor.ts"
+    "check:admin-monitor": "tsx checks/check-admin-monitor.ts",
+    "check:proxy-terminal-error": "tsx checks/check-proxy-terminal-error.ts"
   },
   "dependencies": {
     "@ai-sdk/open-responses": "^1.0.6",

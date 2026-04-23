@@ -13,6 +13,104 @@ export type FallbackReason =
   | 'sse_reconstruction_failure'
   | 'proxy_unhandled_error';
 
+type TimeoutAbortReason = {
+  kind: 'timeout';
+  phase: 'connect' | 'first-byte' | 'first-text' | 'idle' | 'total';
+};
+
+type ClientDisconnectAbortReason = {
+  kind: 'client_disconnect';
+  source: 'request' | 'response';
+};
+
+type ProxyAbortReason = TimeoutAbortReason | ClientDisconnectAbortReason;
+
+type ProxyTerminalErrorLike = {
+  abortReason?: unknown;
+  endpoint?: unknown;
+  error?: unknown;
+};
+
+function isProxyAbortReason(value: unknown): value is ProxyAbortReason {
+  if (typeof value !== 'object' || value === null || !('kind' in value)) {
+    return false;
+  }
+
+  const kind = (value as { kind?: unknown }).kind;
+  if (kind === 'timeout') {
+    const phase = (value as { phase?: unknown }).phase;
+    return ['connect', 'first-byte', 'first-text', 'idle', 'total'].includes(String(phase));
+  }
+
+  if (kind === 'client_disconnect') {
+    const source = (value as { source?: unknown }).source;
+    return source === 'request' || source === 'response';
+  }
+
+  return false;
+}
+
+function extractEndpointSummary(endpoint: unknown) {
+  if (typeof endpoint !== 'object' || endpoint === null) {
+    return undefined;
+  }
+
+  const maybe = endpoint as { name?: unknown; url?: unknown };
+  if (typeof maybe.name === 'string' || typeof maybe.url === 'string') {
+    return {
+      ...(typeof maybe.name === 'string' ? { name: maybe.name } : {}),
+      ...(typeof maybe.url === 'string' ? { url: maybe.url } : {}),
+    } as JsonRecord;
+  }
+
+  return undefined;
+}
+
+export function classifyProxyTerminalError(error: unknown) {
+  const maybe = (typeof error === 'object' && error !== null ? error as ProxyTerminalErrorLike : undefined);
+  const abortReason = isProxyAbortReason(maybe?.abortReason) ? maybe?.abortReason : undefined;
+  const endpoint = extractEndpointSummary(maybe?.endpoint);
+
+  if (abortReason?.kind === 'timeout') {
+    return {
+      statusCode: 504,
+      body: normalizeErrorPayload(504, {
+        error: {
+          message: 'No upstream endpoint produced a usable response before fallback was exhausted',
+          type: 'server_error',
+          details: {
+            reason: 'fallback_exhausted',
+            abortReason,
+            ...(endpoint ? { endpoint } : {}),
+          },
+        },
+      }),
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      statusCode: 500,
+      body: normalizeErrorPayload(500, {
+        error: {
+          message: error.message,
+          type: 'server_error',
+        },
+      }),
+    };
+  }
+
+  return {
+    statusCode: 500,
+    body: normalizeErrorPayload(500, {
+      error: {
+        message: 'Unknown proxy error',
+        type: 'server_error',
+      },
+    }),
+  };
+}
+
 export function normalizeErrorPayload(status: number, payload: unknown) {
   const errorType = status >= 500 ? 'server_error' : 'invalid_request_error';
 

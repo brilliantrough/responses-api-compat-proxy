@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { isJsonRecord, normalizeInput, type JsonRecord, type JsonValue } from './responses-input-normalization.js';
 import { type StreamMode, type UpstreamEndpoint, type ProxyRuntimeConfig } from './proxy-config.js';
 import {
+  classifyProxyTerminalError,
   extractErrorMessage,
   getUpstreamFallbackReason,
   normalizeErrorPayload,
@@ -100,6 +101,17 @@ type StreamOutcome =
       wroteAnyEvent: boolean;
       wroteTextContent: boolean;
       textCharCount: number;
+    }
+  | {
+      kind: 'error';
+      chunkCount: number;
+      totalBytes: number;
+      startedStreaming: boolean;
+      wroteAnyEvent: boolean;
+      wroteTextContent: boolean;
+      textCharCount: number;
+      error: unknown;
+      fallbackReason?: FallbackReason;
     };
 
 type StreamProbeOutcome =
@@ -113,6 +125,17 @@ type StreamProbeOutcome =
       wroteAnyEvent: boolean;
       wroteTextContent: boolean;
       textCharCount: number;
+    }
+  | {
+      kind: 'error';
+      chunkCount: number;
+      totalBytes: number;
+      startedStreaming: boolean;
+      wroteAnyEvent: boolean;
+      wroteTextContent: boolean;
+      textCharCount: number;
+      error: unknown;
+      fallbackReason?: FallbackReason;
     };
 
 type EndpointCircuitState = 'closed' | 'open' | 'half_open';
@@ -1889,9 +1912,20 @@ async function probeAndPipeResponsesTextStream(
           textCharCount,
         };
       }
+
     }
 
-    throw error;
+    return {
+      kind: 'error',
+      chunkCount,
+      totalBytes,
+      startedStreaming,
+      wroteAnyEvent,
+      wroteTextContent,
+      textCharCount,
+      error,
+      fallbackReason: !wroteTextContent ? 'stream_no_text_content' : 'unknown_upstream_error',
+    };
   } finally {
     if (streamTimer) {
       clearTimeout(streamTimer);
@@ -2214,9 +2248,20 @@ async function pipeUpstreamSse(
           textCharCount,
         };
       }
+
     }
 
-    throw error;
+    return {
+      kind: 'error',
+      chunkCount,
+      totalBytes,
+      startedStreaming,
+      wroteAnyEvent,
+      wroteTextContent,
+      textCharCount,
+      error,
+      fallbackReason: !wroteTextContent ? 'stream_no_text_content' : 'unknown_upstream_error',
+    };
   } finally {
     if (streamTimer) {
       clearTimeout(streamTimer);
@@ -2871,6 +2916,68 @@ const server = createServer((req, res) => {
             return;
           }
 
+          if (streamOutcome.kind === 'error') {
+            const canFallback = canAttemptFallbackAfterStreamOutcome(
+              streamOutcome,
+              upstreamController.signal,
+              currentAttempt.endpointIndex,
+              endpoints,
+              fallbackBudget,
+            );
+
+            if (canFallback && streamOutcome.fallbackReason) {
+              fallbackBudget.attemptsUsed += 1;
+              recordFallbackReason(streamOutcome.fallbackReason, currentAttempt.endpoint.name);
+              markEndpointFailure(currentAttempt.endpoint, streamOutcome.fallbackReason, requestId, {
+                streamMode,
+                error: streamOutcome.error instanceof Error
+                  ? { name: streamOutcome.error.name, message: streamOutcome.error.message }
+                  : String(streamOutcome.error),
+              });
+              logRequest(requestId, 'stream read error before usable output, falling back', {
+                fallbackReason: streamOutcome.fallbackReason,
+                upstreamName: currentAttempt.endpoint.name,
+                nextFallbackName: endpoints[currentAttempt.endpointIndex + 1]?.name ?? null,
+                streamMode,
+                wroteAnyEvent: streamOutcome.wroteAnyEvent,
+                wroteTextContent: streamOutcome.wroteTextContent,
+                textCharCount: streamOutcome.textCharCount,
+                error: streamOutcome.error instanceof Error
+                  ? { name: streamOutcome.error.name, message: streamOutcome.error.message }
+                  : String(streamOutcome.error),
+              });
+              await closeResponseBody(currentAttempt.response);
+              currentAttempt.dispose();
+              currentAttempt = await fetchResponsesUpstream(
+                requestId,
+                upstreamBody,
+                upstreamController.signal,
+                streamResponse,
+                fallbackBudget,
+                currentAttempt.endpointIndex + 1,
+              );
+              selectedEndpoint = currentAttempt.endpoint;
+              continue;
+            }
+
+            currentAttempt.dispose();
+            if (streamOutcome.startedStreaming && !res.writableEnded && !res.destroyed) {
+              sendResponsesStreamError(res, 'Upstream stream terminated unexpectedly', {
+                statusCode: 502,
+                code: 'server_error',
+                sequenceNumber: streamOutcome.chunkCount + 1,
+              });
+            } else if (!res.headersSent) {
+              sendJson(res, 502, makeError('Upstream stream terminated unexpectedly', 502).body);
+            }
+            finish(502, 'stream read error', {
+              upstreamName: currentAttempt.endpoint.name,
+              streamMode,
+              wroteTextContent: streamOutcome.wroteTextContent,
+            });
+            return;
+          }
+
           currentAttempt.dispose();
           if (streamOutcome.fallbackReason && canAttemptFallbackAfterStreamOutcome(
             streamOutcome,
@@ -3046,6 +3153,51 @@ const server = createServer((req, res) => {
               chunkCount: probeOutcome.chunkCount,
               totalBytes: probeOutcome.totalBytes,
               streamMode,
+              upstreamName: currentAttempt.endpoint.name,
+            });
+            return;
+          }
+
+          if (probeOutcome.kind === 'error') {
+            const canFallback = canAttemptFallbackAfterStreamOutcome(
+              probeOutcome,
+              upstreamController.signal,
+              currentAttempt.endpointIndex,
+              endpoints,
+              fallbackBudget,
+            );
+
+            if (canFallback && probeOutcome.fallbackReason) {
+              fallbackBudget.attemptsUsed += 1;
+              recordFallbackReason(probeOutcome.fallbackReason, currentAttempt.endpoint.name);
+              markEndpointFailure(currentAttempt.endpoint, probeOutcome.fallbackReason, requestId, {
+                streamMode,
+              });
+              logRequest(requestId, 'non-standard stream read error before usable output, falling back', {
+                fallbackReason: probeOutcome.fallbackReason,
+                upstreamContentType,
+                upstreamStatus: currentAttempt.response.status,
+                upstreamName: currentAttempt.endpoint.name,
+                nextFallbackName: endpoints[currentAttempt.endpointIndex + 1]?.name ?? null,
+              });
+              await closeResponseBody(currentAttempt.response);
+              currentAttempt.dispose();
+              currentAttempt = await fetchResponsesUpstream(
+                requestId,
+                upstreamBody,
+                upstreamController.signal,
+                streamResponse,
+                fallbackBudget,
+                currentAttempt.endpointIndex + 1,
+              );
+              selectedEndpoint = currentAttempt.endpoint;
+              continue;
+            }
+
+            currentAttempt.dispose();
+            sendJson(res, 502, makeError('Upstream stream terminated unexpectedly', 502).body);
+            finish(502, 'non-standard stream read error', {
+              upstreamContentType,
               upstreamName: currentAttempt.endpoint.name,
             });
             return;
@@ -3566,9 +3718,9 @@ const server = createServer((req, res) => {
       return;
     }
 
-    const message = error instanceof Error ? error.message : 'Unknown proxy error';
-    sendJson(res, 500, makeError(message, 500).body);
-    finish(500, 'unhandled proxy error', {
+    const terminalError = classifyProxyTerminalError(error);
+    sendJson(res, terminalError.statusCode, terminalError.body as JsonValue);
+    finish(terminalError.statusCode, 'unhandled proxy error', {
       error: errorDetails,
     });
   } finally {
