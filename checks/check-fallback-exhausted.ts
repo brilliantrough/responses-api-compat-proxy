@@ -83,7 +83,7 @@ async function main() {
     fallbackConfigPath,
     JSON.stringify({
       fallback_api_config: [
-        { name: 'bad-a', base_url: `http://127.0.0.1:${badAAddress.port}`, api_key: 'a-key' },
+        { name: 'bad-a', base_url: `http://127.0.0.1:${badAAddress.port}`, api_key: 'a-key', disable_cooldown: true },
         { name: 'bad-b', base_url: `http://127.0.0.1:${badBAddress.port}`, api_key: 'b-key' },
         { name: 'blackhole-fallback', base_url: `http://127.0.0.1:${blackholeAddress.port}`, api_key: 'c-key' },
       ],
@@ -134,6 +134,8 @@ async function main() {
     const output = stdout.join('');
     assert.match(output, /failed to normalize sse payload, falling back/);
     assert.match(output, /fallback exhausted/);
+    assert.match(output, /endpoint failure recorded without cooldown/);
+    assert.doesNotMatch(output, /endpointName":"bad-a"[^\n]*skipping upstream during circuit cooldown/);
     assert.doesNotMatch(output, /unhandled proxy error/);
 
     console.log('Fallback exhausted check passed.');

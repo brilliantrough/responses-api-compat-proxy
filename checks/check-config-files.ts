@@ -52,7 +52,7 @@ function main() {
 
     writeFallbackJson(dir, {
       fallback_api_config: [
-        { name: 'fallback-alpha', base_url: 'https://alpha.example', api_key_env: 'FALLBACK_ALPHA_API_KEY' },
+        { name: 'fallback-alpha', base_url: 'https://alpha.example', api_key_env: 'FALLBACK_ALPHA_API_KEY', disable_cooldown: true },
         { name: 'fallback-inline', base_url: 'https://inline.example', api_key: 'inline-secret-xyz' },
       ],
     });
@@ -73,6 +73,11 @@ function main() {
     assert.equal(primaryEntry.value, MASKED, 'primary api key must be masked');
     assert.equal(primaryEntry.secret, true, 'should be flagged secret');
     assert.ok(readDotEnv(dir).includes('primary-secret'), 'raw .env still contains the real secret value');
+
+    console.log('=== 1b. disable_cooldown is exposed as disableCooldown ===');
+    const alphaFallback = admin.fallbackProviders.find(p => p.name === 'fallback-alpha');
+    assert.ok(alphaFallback, 'fallback-alpha should appear');
+    assert.equal(alphaFallback.disableCooldown, true, 'disable_cooldown should be exposed as disableCooldown');
 
     console.log('=== 2. FALLBACK_ALPHA_API_KEY can be replaced ===');
     const alphaEnvBefore = admin.env.find(e => e.key === 'FALLBACK_ALPHA_API_KEY');
@@ -144,7 +149,7 @@ function main() {
     applyAdminDraft(store4, {
       env: [{ key: 'PRIMARY_PROVIDER_API_KEY', secretAction: 'keep' }],
       fallbackProviders: [
-        { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'MY_FB_KEY' },
+        { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'MY_FB_KEY', disableCooldown: true },
       ],
       modelMappings: {},
     });
@@ -153,6 +158,7 @@ function main() {
     assert.ok(Array.isArray(fb4.fallback_api_config));
     assert.equal(fb4.fallback_api_config[0].api_key_env, 'MY_FB_KEY');
     assert.equal(fb4.fallback_api_config[0].name, 'fb-a');
+    assert.equal(fb4.fallback_api_config[0].disable_cooldown, true);
 
     console.log('=== 6. model-map writes updated alias target ===');
     const dir5 = makeTempDir();
@@ -197,6 +203,22 @@ function main() {
 
     const fb6 = readFallbackJson(dir6);
     assert.equal(fb6.fallback_api_config[0].api_key, 'inline-secret-xyz', 'keep preserves inline secret');
+
+    console.log('=== 7b. disableCooldown false omits disable_cooldown ===');
+    const dir6b = makeTempDir();
+    writeDotEnv(dir6b, 'PRIMARY_PROVIDER_API_KEY=pk\n');
+    writeFallbackJson(dir6b, { fallback_api_config: [] });
+    writeModelMapJson(dir6b, { model_mappings: {} });
+    const store6b = createConfigFileStore(dir6b);
+    applyAdminDraft(store6b, {
+      env: [{ key: 'PRIMARY_PROVIDER_API_KEY', secretAction: 'keep' }],
+      fallbackProviders: [
+        { name: 'fb-default', baseUrl: 'https://default.example', apiKeyMode: 'none', disableCooldown: false },
+      ],
+      modelMappings: {},
+    });
+    const fb6b = readFallbackJson(dir6b);
+    assert.equal('disable_cooldown' in fb6b.fallback_api_config[0], false, 'false should keep fallback.json compact');
 
     console.log('=== 8. clear removes a secret ===');
     const dir7 = makeTempDir();

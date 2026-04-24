@@ -16,6 +16,7 @@ export type EnvEntry = {
 export type FallbackProviderView = {
   name: string;
   baseUrl: string;
+  disableCooldown: boolean;
   apiKeyMode: 'env' | 'inline' | 'none';
   apiKeyEnv?: string;
   apiKeyConfigured: boolean;
@@ -37,6 +38,7 @@ export type EnvDraftEntry = {
 export type FallbackProviderDraft = {
   name: string;
   baseUrl: string;
+  disableCooldown?: boolean;
   apiKeyMode: 'env' | 'inline' | 'none';
   apiKeyEnv?: string;
   value?: string;
@@ -96,6 +98,7 @@ function parseFallbackFile(filePath: string): { fallback_api_config: Array<{
   base_url: string;
   api_key?: string;
   api_key_env?: string;
+  disable_cooldown?: boolean;
 }> } {
   if (!existsSync(filePath)) return { fallback_api_config: [] };
   const raw = readFileSync(filePath, 'utf8');
@@ -167,6 +170,7 @@ export function readForAdmin(store: ConfigFileStore): AdminConfigView {
     return {
       name: item.name,
       baseUrl: item.base_url,
+      disableCooldown: item.disable_cooldown === true,
       apiKeyMode,
       apiKeyEnv,
       apiKeyConfigured,
@@ -220,6 +224,10 @@ export function applyAdminDraft(store: ConfigFileStore, draft: AdminConfigDraft)
       name: p.name,
       base_url: p.baseUrl,
     };
+
+    if (p.disableCooldown === true) {
+      (item as Record<string, unknown>).disable_cooldown = true;
+    }
 
     // Check if existing inline secret needs preserving
     const existing = (fallbackParsed.fallback_api_config ?? []).find(
@@ -298,6 +306,9 @@ export function validateDraft(draft: unknown): { ok: true; warnings: string[] } 
       }
       if (typeof p.baseUrl !== 'string' || p.baseUrl.trim().length === 0) {
         errors.push(`draft.fallbackProviders[${i}].baseUrl must be a non-empty string`);
+      }
+      if (p.disableCooldown !== undefined && typeof p.disableCooldown !== 'boolean') {
+        errors.push(`draft.fallbackProviders[${i}].disableCooldown must be a boolean`);
       }
       if (p.apiKeyMode !== undefined && !['env', 'inline', 'none'].includes(String(p.apiKeyMode))) {
         errors.push(`draft.fallbackProviders[${i}].apiKeyMode must be 'env', 'inline', or 'none'`);

@@ -505,6 +505,22 @@ function markEndpointFailure(
   health.lastFailureReason = reason;
   health.lastFailureAt = now;
 
+  if (endpoint.disableCooldown) {
+    health.state = 'closed';
+    health.cooldownUntil = 0;
+    health.halfOpenProbeInFlight = 0;
+    if (requestId) {
+      logRequest(requestId, 'endpoint failure recorded without cooldown', {
+        endpointName: endpoint.name,
+        endpointUrl: endpoint.url,
+        reason,
+        endpointHealth: getEndpointHealthSnapshot(endpoint),
+        ...extra,
+      });
+    }
+    return;
+  }
+
   const shouldOpenNow = shouldOpenCircuitImmediately(reason) || health.failureCount >= Math.max(1, getConfig().endpointFailureThreshold);
   if (shouldOpenNow) {
     const cooldownMs = getCooldownMsForReason(reason);

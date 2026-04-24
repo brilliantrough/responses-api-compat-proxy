@@ -98,7 +98,7 @@ async function main() {
 
     const requiredIds = [
       'status', 'dirty-badge', 'restart-notice',
-      'primary-table', 'fallback-table',
+      'primary-table', 'fallback-table', 'btn-add-fallback',
       'model-mappings-list', 'btn-add-mapping',
       'runtime-table',
       'btn-validate', 'btn-save', 'btn-reload', 'btn-rollback',
@@ -122,6 +122,8 @@ async function main() {
     assert.ok(js.includes('password'), 'JS should use password inputs for secrets');
     assert.ok(js.includes('restartRequired'), 'JS should check restart-required fields');
     assert.ok(js.includes('badge-dirty'), 'JS should track dirty state');
+    assert.ok(js.includes('addFallbackProvider'), 'JS should define addFallbackProvider');
+    assert.ok(js.includes('disableCooldown'), 'JS should handle fallback disableCooldown');
 
     console.log('=== 4. CSS has required styles ===');
     const cssRes = await fetch(`${baseUrl}/admin/assets/admin.css`);
@@ -153,6 +155,7 @@ async function main() {
     assert.equal(fbArr.length, 2, 'should have two fallback providers');
     assert.equal(fbArr[0].name, 'fb-a');
     assert.equal(fbArr[0].apiKeyMode, 'env');
+    assert.equal(fbArr[0].disableCooldown, false);
     assert.equal(fbArr[0].apiKeyMasked, '***', 'fallback env key should be masked');
     assert.equal(fbArr[1].name, 'fb-inline');
     assert.equal(fbArr[1].apiKeyMode, 'inline');

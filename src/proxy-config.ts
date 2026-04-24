@@ -8,6 +8,7 @@ export type UpstreamEndpoint = {
   url: string;
   apiKey: string;
   isFallback: boolean;
+  disableCooldown?: boolean;
 };
 
 export type ProxyRuntimeConfig = {
@@ -76,6 +77,7 @@ type FallbackApiConfig = {
   base_url: string;
   api_key?: string;
   api_key_env?: string;
+  disable_cooldown?: boolean;
 };
 
 export function normalizeBaseUrl(baseUrl: string) {
@@ -235,6 +237,7 @@ function loadFallbackEndpoints(fallbackConfigPath: string, env: NodeJS.ProcessEn
             url: `${normalizeBaseUrl(item.base_url)}/v1/responses`,
             apiKey: resolvedApiKey,
             isFallback: true,
+            disableCooldown: item.disable_cooldown === true,
           },
         ];
       });

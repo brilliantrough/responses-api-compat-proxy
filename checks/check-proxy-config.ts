@@ -9,7 +9,16 @@ function main() {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'responses-proxy-config-'));
   const fallbackConfigPath = path.join(tempDir, 'fallback.json');
   const modelMapPath = path.join(tempDir, 'model-map.json');
-  writeFileSync(fallbackConfigPath, JSON.stringify({ fallback_api_config: [] }), 'utf8');
+  writeFileSync(fallbackConfigPath, JSON.stringify({
+    fallback_api_config: [
+      {
+        name: 'stable-last-resort',
+        base_url: 'https://stable.example',
+        api_key: 'stable-key',
+        disable_cooldown: true,
+      },
+    ],
+  }), 'utf8');
   writeFileSync(modelMapPath, JSON.stringify({ model_mappings: {} }), 'utf8');
 
   try {
@@ -24,6 +33,9 @@ function main() {
     assert.equal(config.defaultModel, 'my-model-v2');
     assert.equal(config.upstreamUrl, 'https://primary.example/v1/responses');
     assert.equal(config.upstreamModelsUrl, 'https://primary.example/v1/models');
+    assert.equal(config.fallbackEndpoints.length, 1);
+    assert.equal(config.fallbackEndpoints[0].name, 'stable-last-resort');
+    assert.equal(config.fallbackEndpoints[0].disableCooldown, true);
 
     const extraEnvConfig = createProxyRuntimeConfig({
       PRIMARY_PROVIDER_API_KEY: 'primary-key',

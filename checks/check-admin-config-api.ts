@@ -133,7 +133,7 @@ async function main() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         env: [{ key: 'SOME_KEY', value: 'new-value' }],
-        fallbackProviders: [{ name: 'fb-1', baseUrl: 'https://fb.example', apiKeyMode: 'none' }],
+        fallbackProviders: [{ name: 'fb-1', baseUrl: 'https://fb.example', apiKeyMode: 'none', disableCooldown: true }],
         modelMappings: { 'test-alias': 'test-model' },
       }),
     });
@@ -167,7 +167,7 @@ async function main() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         env: [{ key: 'PRIMARY_PROVIDER_API_KEY', secretAction: 'keep' }],
-        fallbackProviders: [],
+        fallbackProviders: [{ name: 'new-fb', baseUrl: 'https://new-fb.example', apiKeyMode: 'none', disableCooldown: true }],
         modelMappings: { 'new-alias': 'new-target' },
       }),
     });
@@ -197,6 +197,9 @@ async function main() {
       !existsSync(path.join(envDir, 'fallback.json')),
       'no fallback.json should exist in envDir',
     );
+    const fallbackInConfigDir = JSON.parse(readFileSync(fallbackPath, 'utf8'));
+    assert.equal(fallbackInConfigDir.fallback_api_config[0].name, 'new-fb');
+    assert.equal(fallbackInConfigDir.fallback_api_config[0].disable_cooldown, true);
 
     console.log('=== 6. POST /admin/config/reload returns 200 ===');
     const reloadRes = await fetch(`${baseUrl}/admin/config/reload`, {

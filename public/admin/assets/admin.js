@@ -83,6 +83,21 @@
     checkDirty();
   }
 
+  function addFallbackProvider() {
+    var suffix = Date.now();
+    draftFallback.push({
+      name: 'new-fallback-' + suffix,
+      baseUrl: 'https://provider.example',
+      apiKeyMode: 'env',
+      apiKeyEnv: 'NEW_FALLBACK_API_KEY',
+      disableCooldown: false,
+      apiKeyConfigured: false,
+      apiKeyMasked: null
+    });
+    renderFallbackProviders();
+    setDirty(true);
+  }
+
   function moveFallbackProvider(fromIndex, toIndex) {
     if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
     var moved = draftFallback.splice(fromIndex, 1)[0];
@@ -112,9 +127,9 @@
     });
     var envChanged = JSON.stringify(curEnv) !== JSON.stringify(origEnv);
     var fbChanged = JSON.stringify(draftFallback.map(function(p) {
-      return { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode, apiKeyEnv: p.apiKeyEnv, secretAction: p.secretAction };
+      return { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode, apiKeyEnv: p.apiKeyEnv, secretAction: p.secretAction, disableCooldown: p.disableCooldown === true };
     })) !== JSON.stringify(serverConfig.fallbackProviders.map(function(p) {
-      return { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode, apiKeyEnv: p.apiKeyEnv, secretAction: 'keep' };
+      return { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode, apiKeyEnv: p.apiKeyEnv, secretAction: 'keep', disableCooldown: p.disableCooldown === true };
     }));
     var mmChanged = JSON.stringify(draftModelMappings) !== JSON.stringify(serverConfig.modelMappings);
     setDirty(envChanged || fbChanged || mmChanged);
@@ -212,8 +227,8 @@
     tbody.innerHTML = '';
     if (draftFallback.length === 0) {
       var emptyTr = document.createElement('tr');
-      var emptyTd = document.createElement('td');
-      emptyTd.colSpan = 7;
+        var emptyTd = document.createElement('td');
+        emptyTd.colSpan = 8;
       emptyTd.className = 'loading';
       emptyTd.textContent = 'No fallback providers in the current draft.';
       emptyTr.appendChild(emptyTd);
@@ -384,6 +399,22 @@
       }
       tr.appendChild(tdEnv);
 
+      var tdDisableCooldown = document.createElement('td');
+      var cooldownStack = document.createElement('div');
+      cooldownStack.className = 'checkbox-stack';
+      var cooldownCheckbox = document.createElement('input');
+      cooldownCheckbox.type = 'checkbox';
+      cooldownCheckbox.checked = p.disableCooldown === true;
+      cooldownCheckbox.dataset.idx = index;
+      cooldownCheckbox.addEventListener('change', function() {
+        draftFallback[parseInt(this.dataset.idx)].disableCooldown = this.checked;
+        checkDirty();
+      });
+      cooldownStack.appendChild(cooldownCheckbox);
+      appendHelperText(cooldownStack, 'Keep this fallback available after failures; current request can still fall through.');
+      tdDisableCooldown.appendChild(cooldownStack);
+      tr.appendChild(tdDisableCooldown);
+
       var tdConf = document.createElement('td');
       tdConf.textContent = p.apiKeyConfigured ? 'Yes' : 'No';
       tr.appendChild(tdConf);
@@ -533,6 +564,7 @@
       }),
       fallbackProviders: draftFallback.map(function(p) {
         var out = { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode || 'none' };
+        out.disableCooldown = p.disableCooldown === true;
         if (p.apiKeyMode === 'env' && p.apiKeyEnv) out.apiKeyEnv = p.apiKeyEnv;
         if (p.apiKeyMode === 'inline') {
           out.secretAction = p.secretAction || 'keep';
@@ -601,6 +633,8 @@
     renderModelMappings();
     setDirty(true);
   });
+
+  document.getElementById('btn-add-fallback').addEventListener('click', addFallbackProvider);
 
   document.getElementById('btn-validate').addEventListener('click', async function() {
     validationResult.innerHTML = '<div class="loading">Validating...</div>';
