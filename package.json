@@ -29,6 +29,7 @@
     "build": "tsc -p tsconfig.json",
     "basic": "tsx tools/basic-response.ts",
     "check:connect-timeout-fallback": "tsx checks/check-connect-timeout-fallback.ts",
+    "check:connect-error-fallback": "tsx checks/check-connect-error-fallback.ts",
     "check:connect-timeout-recovered-fallback": "tsx checks/check-connect-timeout-recovered-fallback.ts",
     "check:config": "tsx checks/check-proxy-config.ts",
     "check:fallback": "tsx checks/check-fallback-policy.ts",

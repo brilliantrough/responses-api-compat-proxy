@@ -469,7 +469,7 @@ function getEndpointHealthSnapshot(endpoint: UpstreamEndpoint) {
 }
 
 function getCooldownMsForReason(reason: FallbackReason | 'connect_timeout' | 'body_timeout') {
-  if (reason === 'connect_timeout' || reason === 'body_timeout' || reason === 'headers_only_timeout') {
+  if (reason === 'connect_error' || reason === 'connect_timeout' || reason === 'body_timeout' || reason === 'headers_only_timeout') {
     return getConfig().endpointTimeoutCooldownMs;
   }
 
@@ -1526,6 +1526,12 @@ async function fetchResponsesUpstream(
         canContinueSearchingUpstreams(parentSignal, budget, attemptedIndices, boundedStartIndex, endpoints)
           ? findNextAvailableEndpointIndex(requestId, endpoints, boundedStartIndex, index + 1, attemptedIndices)
           : undefined;
+      const connectErrorNextIndex =
+        !connectTimeoutAbortReason &&
+        !isAbortErrorLike(error, abortReason) &&
+        canContinueSearchingUpstreams(parentSignal, budget, attemptedIndices, boundedStartIndex, endpoints)
+          ? findNextAvailableEndpointIndex(requestId, endpoints, boundedStartIndex, index + 1, attemptedIndices)
+          : undefined;
       const connectTimeoutPhase = connectTimeoutAbortReason?.phase;
 
       if (nextIndex !== undefined && connectTimeoutPhase) {
@@ -1539,6 +1545,30 @@ async function fetchResponsesUpstream(
           nextFallbackName: endpoints[nextIndex]?.name ?? null,
         });
         searchStartIndex = nextIndex;
+        continue;
+      }
+
+      if (connectErrorNextIndex !== undefined) {
+        budget.attemptsUsed += 1;
+        recordFallbackReason('connect_error', endpoint.name);
+        markEndpointFailure(endpoint, 'connect_error', requestId, {
+          errorName: error instanceof Error ? error.name : undefined,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          causeCode: typeof (error as { cause?: { code?: unknown } })?.cause?.code === 'string'
+            ? (error as { cause: { code: string } }).cause.code
+            : undefined,
+        });
+        logRequest(requestId, 'upstream connect error encountered, falling back', {
+          upstreamName: endpoint.name,
+          upstreamUrl: endpoint.url,
+          errorName: error instanceof Error ? error.name : undefined,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          causeCode: typeof (error as { cause?: { code?: unknown } })?.cause?.code === 'string'
+            ? (error as { cause: { code: string } }).cause.code
+            : undefined,
+          nextFallbackName: endpoints[connectErrorNextIndex]?.name ?? null,
+        });
+        searchStartIndex = connectErrorNextIndex;
         continue;
       }
 

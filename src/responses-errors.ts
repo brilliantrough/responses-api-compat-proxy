@@ -5,6 +5,7 @@ export type FallbackReason =
   | 'upstream_5xx'
   | 'retryable_4xx'
   | 'compat_4xx'
+  | 'connect_error'
   | 'unknown_upstream_error'
   | 'headers_only_timeout'
   | 'stream_no_text_content'
