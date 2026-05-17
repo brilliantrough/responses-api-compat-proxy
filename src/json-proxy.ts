@@ -3,7 +3,14 @@ import { createServer } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolve } from 'node:path';
 
-import { isJsonRecord, normalizeInput, type JsonRecord, type JsonValue } from './responses-input-normalization.js';
+import {
+  isJsonRecord,
+  normalizeInput,
+  sanitizeClaudeBillingHeaderMessageContent,
+  sanitizeClaudeBillingHeaderText,
+  type JsonRecord,
+  type JsonValue,
+} from './responses-input-normalization.js';
 import { type StreamMode, type UpstreamEndpoint, type ProxyRuntimeConfig } from './proxy-config.js';
 import {
   classifyProxyTerminalError,
@@ -752,13 +759,37 @@ function sanitizeForLog(value: JsonValue, maxStringLength = 1200): JsonValue {
   );
 }
 
+function sanitizeRequestBodyForLog(body: JsonRecord): JsonRecord {
+  const sanitized: JsonRecord = { ...body };
+  const mode = getConfig().claudeBillingHeaderMode;
+
+  if (typeof sanitized.instructions === 'string') {
+    sanitized.instructions = sanitizeClaudeBillingHeaderText(sanitized.instructions, mode);
+  }
+
+  if (Array.isArray(sanitized.input)) {
+    sanitized.input = sanitized.input.map(item => {
+      if (!isJsonRecord(item) || typeof item.role !== 'string' || item.content === undefined) {
+        return item;
+      }
+
+      return {
+        ...item,
+        content: sanitizeClaudeBillingHeaderMessageContent(item.role, item.content, mode),
+      };
+    });
+  }
+
+  return sanitized;
+}
+
 function logRequestBodiesPreview(requestId: string, requestBody: JsonRecord, upstreamBody: JsonRecord) {
   if (!getConfig().logRequestBodies) {
     return;
   }
 
   logRequest(requestId, 'request body preview', {
-    requestBody: sanitizeForLog(requestBody),
+    requestBody: sanitizeForLog(sanitizeRequestBodyForLog(requestBody)),
     upstreamBody: sanitizeForLog(upstreamBody),
   });
 }
@@ -839,6 +870,8 @@ function logForwardingUpstream(
   if (getConfig().overrideInstructionsText !== null) {
     details.overrideInstructions = true;
   }
+
+  details.claudeBillingHeaderMode = getConfig().claudeBillingHeaderMode;
 
   logRequest(requestId, 'forwarding upstream', details);
 }
@@ -1174,12 +1207,16 @@ function normalizeRequestBody(body: JsonRecord, stream: boolean): JsonRecord {
   const { proxy_stream_mode: _proxyStreamMode, ...rest } = body;
   const requestedModel = typeof rest.model === 'string' ? rest.model : getConfig().defaultModel;
   const mappedModel = getConfig().modelMappings[requestedModel] ?? requestedModel;
-  const instructions =
+  const rawInstructions =
     getConfig().overrideInstructionsText !== null
       ? getConfig().overrideInstructionsText
       : getConfig().clearInstructions && typeof rest.instructions === 'string'
       ? ''
       : rest.instructions;
+  const instructions =
+    typeof rawInstructions === 'string'
+      ? sanitizeClaudeBillingHeaderText(rawInstructions, getConfig().claudeBillingHeaderMode)
+      : rawInstructions;
   const promptCacheRetention =
     typeof rest.prompt_cache_retention === 'string' && ['in_memory', '24h'].includes(rest.prompt_cache_retention)
       ? rest.prompt_cache_retention
@@ -1195,10 +1232,12 @@ function normalizeRequestBody(body: JsonRecord, stream: boolean): JsonRecord {
     ...(rest.instructions === undefined && getConfig().overrideInstructionsText === null ? {} : { instructions }),
     ...(promptCacheRetention === null ? {} : { prompt_cache_retention: promptCacheRetention }),
     ...(promptCacheKey === null ? {} : { prompt_cache_key: promptCacheKey }),
+    ...(rest.reasoning === undefined ? { reasoning: { effort: 'high' } } : {}),
     input: normalizeInput(rest.input, {
       clearDeveloperContent: getConfig().clearDeveloperContent,
       clearSystemContent: getConfig().clearSystemContent,
       convertSystemToDeveloper: getConfig().convertSystemToDeveloper,
+      claudeBillingHeaderMode: getConfig().claudeBillingHeaderMode,
     }),
     stream,
     ...(getConfig().forceStoreFalse ? { store: false } : {}),
@@ -2448,6 +2487,7 @@ const server = createServer((req, res) => {
     clientErrorPatterns,
     compatFallbackPatterns,
     clearDeveloperContent,
+    claudeBillingHeaderMode,
     clearInstructions,
     clearSystemContent,
     convertSystemToDeveloper,
@@ -2579,6 +2619,7 @@ const server = createServer((req, res) => {
         clearSystemContent,
         defaultPromptCacheKey,
         defaultPromptCacheRetention,
+        claudeBillingHeaderMode,
         modelMappings,
         overrideInstructionsText,
         logRequestBodies,
@@ -3097,6 +3138,29 @@ const server = createServer((req, res) => {
             continue;
           }
 
+          currentAttempt.dispose();
+          if (streamOutcome.fallbackReason) {
+            const message = `No upstream endpoint produced a usable response before fallback was exhausted: ${streamOutcome.fallbackReason}`;
+            sendResponsesStreamError(res, message, {
+              statusCode: 502,
+              code: 'server_error',
+              sequenceNumber: streamOutcome.chunkCount + 1,
+            });
+            finish(502, 'stream fallback exhausted without usable output', {
+              fallbackReason: streamOutcome.fallbackReason,
+              upstreamName: currentAttempt.endpoint.name,
+              streamMode,
+              usageFound: Boolean(streamOutcome.usage),
+              usageOutputTokens: streamOutcome.usage && typeof streamOutcome.usage.outputTokens === 'number' ? streamOutcome.usage.outputTokens : null,
+              chunkCount: streamOutcome.chunkCount,
+              totalBytes: streamOutcome.totalBytes,
+              wroteAnyEvent: streamOutcome.wroteAnyEvent,
+              wroteTextContent: streamOutcome.wroteTextContent,
+              textCharCount: streamOutcome.textCharCount,
+            });
+            return;
+          }
+
           if (streamMode === 'normalized') {
             proxyStats.responsesSseNormalized += 1;
           } else {
@@ -3290,6 +3354,28 @@ const server = createServer((req, res) => {
             }
 
             currentAttempt.dispose();
+            if (probeOutcome.fallbackReason) {
+              const message = `No upstream endpoint produced a usable response before fallback was exhausted: ${probeOutcome.fallbackReason}`;
+              sendResponsesStreamError(res, message, {
+                statusCode: 502,
+                code: 'server_error',
+                sequenceNumber: probeOutcome.chunkCount + 1,
+              });
+              finish(502, 'non-standard stream fallback exhausted without usable output', {
+                fallbackReason: probeOutcome.fallbackReason,
+                upstreamContentType,
+                upstreamStatus: currentAttempt.response.status,
+                upstreamName: currentAttempt.endpoint.name,
+                streamMode,
+                chunkCount: probeOutcome.chunkCount,
+                totalBytes: probeOutcome.totalBytes,
+                wroteAnyEvent: probeOutcome.wroteAnyEvent,
+                wroteTextContent: probeOutcome.wroteTextContent,
+                textCharCount: probeOutcome.textCharCount,
+              });
+              return;
+            }
+
             if (streamMode === 'normalized') {
               proxyStats.responsesSseNormalized += 1;
             } else {
@@ -3808,6 +3894,7 @@ server.listen(_initialSnapshot.config.port, _initialSnapshot.config.host, () => 
   console.log(`Clear developer content: ${c.clearDeveloperContent ? 'enabled' : 'disabled'}`);
   console.log(`Clear instructions: ${c.clearInstructions ? 'enabled' : 'disabled'}`);
   console.log(`Override instructions text: ${c.overrideInstructionsText === null ? 'disabled' : JSON.stringify(c.overrideInstructionsText)}`);
+  console.log(`Claude billing header mode: ${c.claudeBillingHeaderMode}`);
   console.log(`Clear system content: ${c.clearSystemContent ? 'enabled' : 'disabled'}`);
   console.log(`Convert system to developer: ${c.convertSystemToDeveloper ? 'enabled' : 'disabled'}`);
   console.log(`Request body logging: ${c.logRequestBodies ? 'enabled' : 'disabled'}`);

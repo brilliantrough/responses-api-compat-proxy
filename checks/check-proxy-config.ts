@@ -33,6 +33,7 @@ function main() {
     assert.equal(config.defaultModel, 'my-model-v2');
     assert.equal(config.upstreamUrl, 'https://primary.example/v1/responses');
     assert.equal(config.upstreamModelsUrl, 'https://primary.example/v1/models');
+    assert.equal(config.claudeBillingHeaderMode, 'strip_line', 'Claude billing header default mode');
     assert.equal(config.fallbackEndpoints.length, 1);
     assert.equal(config.fallbackEndpoints[0].name, 'stable-last-resort');
     assert.equal(config.fallbackEndpoints[0].disableCooldown, true);
@@ -47,6 +48,14 @@ function main() {
 
     assert.equal(extraEnvConfig.apiKey, 'primary-key');
     assert.equal(extraEnvConfig.defaultModel, 'my-model-v2');
+
+    const stripCchConfig = createProxyRuntimeConfig({
+      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PROXY_CLAUDE_BILLING_HEADER_MODE: 'strip-cch',
+      FALLBACK_CONFIG_PATH: fallbackConfigPath,
+      MODEL_MAP_PATH: modelMapPath,
+    });
+    assert.equal(stripCchConfig.claudeBillingHeaderMode, 'strip_cch');
 
     console.log('Proxy config checks passed.');
   } finally {

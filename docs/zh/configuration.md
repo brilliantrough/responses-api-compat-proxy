@@ -190,9 +190,17 @@ PROXY_CLEAR_DEVELOPER_CONTENT=0
 PROXY_CLEAR_SYSTEM_CONTENT=0
 PROXY_CLEAR_INSTRUCTIONS=0
 PROXY_OVERRIDE_INSTRUCTIONS_TEXT=
+PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line
 ```
 
 只有当某些 provider 需要额外兼容处理时才建议改这里。默认会启用 `PROXY_CONVERT_SYSTEM_TO_DEVELOPER`。
+
+`PROXY_CLAUDE_BILLING_HEADER_MODE` 用于处理 Claude Code / Anthropic attribution 行经过其他网关转换后落入 OpenAI Responses `instructions` 或 system/developer 文本块的情况：
+
+- `strip_line`：默认值。删除整行 `x-anthropic-billing-header: ...`，让 prompt 前缀保持稳定，利于缓存命中。
+- `strip_cch`：保留 billing header 行，只删除动态的 `cch=...` 字段。
+
+这个设置不会清理 user role 内容，用户实际输入中的同名文本会保持原样。
 
 ## fallback provider 配置
 
@@ -267,6 +275,8 @@ PROXY_PROMPT_CACHE_KEY=stable-prefix-key
 `PROXY_PROMPT_CACHE_KEY` 只能用于稳定的 prompt 前缀 key，不要加入时间戳、UUID、request id 或其他按请求变化的熵，否则 cache hit rate 会非常差。
 
 上游 provider 是否真的支持这些 hint，仍取决于它自身实现。
+
+如果客户端会通过 Claude Code 相关网关转发到本代理，建议保持 `PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line`。这类动态 billing header 经常位于 `instructions` 的最开头，即使 `prompt_cache_key` 稳定，也可能破坏基于前缀的缓存匹配。
 
 ## 调试参数（默认关闭）
 

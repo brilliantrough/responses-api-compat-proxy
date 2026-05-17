@@ -19,7 +19,8 @@
     'PROXY_UPSTREAM_TIMEOUT_MS', 'PROXY_NON_STREAM_TIMEOUT_MS',
     'PROXY_TOTAL_REQUEST_TIMEOUT_MS', 'PROXY_MAX_CONCURRENT_REQUESTS',
     'PROXY_FORCE_STORE_FALSE', 'PROXY_CONVERT_SYSTEM_TO_DEVELOPER',
-    'PROXY_PROMPT_CACHE_RETENTION', 'PROXY_PROMPT_CACHE_KEY'
+    'PROXY_PROMPT_CACHE_RETENTION', 'PROXY_PROMPT_CACHE_KEY',
+    'PROXY_CLAUDE_BILLING_HEADER_MODE'
   ];
 
   function isSecret(key) {
@@ -48,7 +49,8 @@
       PRIMARY_PROVIDER_DEFAULT_MODEL: 'Used as the default upstream model for quick testing.',
       PROXY_ENV_PATH: 'Admin reads and writes this .env file path.',
       FALLBACK_CONFIG_PATH: 'JSON file saved when fallback providers are updated.',
-      MODEL_MAP_PATH: 'JSON file saved when model mappings are updated.'
+      MODEL_MAP_PATH: 'JSON file saved when model mappings are updated.',
+      PROXY_CLAUDE_BILLING_HEADER_MODE: 'strip_line removes the whole Claude billing header line; strip_cch only removes the dynamic cch field.'
     };
     return helpers[key] || '';
   }
@@ -120,10 +122,16 @@
   function checkDirty() {
     if (!serverConfig) return;
     var origEnv = serverConfig.env.map(function(e) {
-      return { key: e.key, secretAction: (e.secret || isSecret(e.key)) ? 'keep' : undefined };
+      if (e.secret || isSecret(e.key)) {
+        return { key: e.key, secretAction: 'keep' };
+      }
+      return { key: e.key, value: e.value };
     });
     var curEnv = draftEnv.map(function(e) {
-      return { key: e.key, secretAction: e.secretAction || undefined };
+      if (e.secretAction || isSecret(e.key)) {
+        return { key: e.key, secretAction: e.secretAction || 'keep' };
+      }
+      return { key: e.key, value: e.value };
     });
     var envChanged = JSON.stringify(curEnv) !== JSON.stringify(origEnv);
     var fbChanged = JSON.stringify(draftFallback.map(function(p) {
@@ -193,6 +201,26 @@
                 draftEnv[j].secretAction = 'keep';
                 delete draftEnv[j].value;
               }
+              break;
+            }
+          }
+          checkDirty();
+        });
+      } else if (e.key === 'PROXY_CLAUDE_BILLING_HEADER_MODE') {
+        input = document.createElement('select');
+        ['strip_line', 'strip_cch'].forEach(function(mode) {
+          var opt = document.createElement('option');
+          opt.value = mode;
+          opt.textContent = mode;
+          if ((draftEntry.value || 'strip_line') === mode) opt.selected = true;
+          input.appendChild(opt);
+        });
+        input.dataset.key = e.key;
+        input.addEventListener('change', function() {
+          var k = this.dataset.key;
+          for (var j = 0; j < draftEnv.length; j++) {
+            if (draftEnv[j].key === k) {
+              draftEnv[j].value = this.value;
               break;
             }
           }

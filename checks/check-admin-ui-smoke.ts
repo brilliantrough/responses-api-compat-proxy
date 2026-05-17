@@ -124,6 +124,8 @@ async function main() {
     assert.ok(js.includes('badge-dirty'), 'JS should track dirty state');
     assert.ok(js.includes('addFallbackProvider'), 'JS should define addFallbackProvider');
     assert.ok(js.includes('disableCooldown'), 'JS should handle fallback disableCooldown');
+    assert.ok(js.includes('PROXY_CLAUDE_BILLING_HEADER_MODE'), 'JS should expose Claude billing header mode');
+    assert.ok(js.includes('strip_cch'), 'JS should offer strip_cch mode');
 
     console.log('=== 4. CSS has required styles ===');
     const cssRes = await fetch(`${baseUrl}/admin/assets/admin.css`);
@@ -150,6 +152,9 @@ async function main() {
     const secretEntry = envArr.find(e => e.key === 'PRIMARY_PROVIDER_API_KEY');
     assert.ok(secretEntry, 'should have PRIMARY_PROVIDER_API_KEY');
     assert.equal(secretEntry!.value, '***', 'API key should be masked');
+    const billingModeEntry = envArr.find(e => e.key === 'PROXY_CLAUDE_BILLING_HEADER_MODE');
+    assert.ok(billingModeEntry, 'should have default PROXY_CLAUDE_BILLING_HEADER_MODE for runtime UI');
+    assert.equal(billingModeEntry!.value, 'strip_line');
 
     const fbArr = config.fallbackProviders as Array<Record<string, unknown>>;
     assert.equal(fbArr.length, 2, 'should have two fallback providers');

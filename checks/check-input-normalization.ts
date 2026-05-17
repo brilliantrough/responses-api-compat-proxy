@@ -158,6 +158,50 @@ function main() {
     },
   ]);
 
+  assert.deepEqual(normalizeInput([
+    {
+      role: 'system',
+      content: 'x-anthropic-billing-header: cc_version=2.1.119.47e; cc_entrypoint=sdk-cli; cch=abc123;\n\nstable system',
+    },
+    {
+      role: 'developer',
+      content: [{ type: 'input_text', text: 'x-anthropic-billing-header: cc_version=2.1.119.47e; cch=def456;\nstable developer' }],
+    },
+    {
+      role: 'user',
+      content: 'x-anthropic-billing-header: cch=user;\nuser text',
+    },
+  ], { claudeBillingHeaderMode: 'strip_line' }), [
+    {
+      type: 'message',
+      role: 'developer',
+      content: 'stable system',
+    },
+    {
+      type: 'message',
+      role: 'developer',
+      content: [{ type: 'input_text', text: 'stable developer' }],
+    },
+    {
+      type: 'message',
+      role: 'user',
+      content: 'x-anthropic-billing-header: cch=user;\nuser text',
+    },
+  ]);
+
+  assert.deepEqual(normalizeInput([
+    {
+      role: 'system',
+      content: 'x-anthropic-billing-header: cc_version=2.1.119.47e; cc_entrypoint=sdk-cli; cch=abc123;\nstable system',
+    },
+  ], { claudeBillingHeaderMode: 'strip_cch' }), [
+    {
+      type: 'message',
+      role: 'developer',
+      content: 'x-anthropic-billing-header: cc_version=2.1.119.47e; cc_entrypoint=sdk-cli;\nstable system',
+    },
+  ]);
+
   console.log('Input normalization checks passed.');
 }
 

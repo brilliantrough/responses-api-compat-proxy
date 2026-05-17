@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { ClaudeBillingHeaderMode } from './responses-input-normalization.js';
 
 export type StreamMode = 'normalized' | 'raw';
 
@@ -42,6 +43,7 @@ export type ProxyRuntimeConfig = {
   convertSystemToDeveloper: boolean;
   clearInstructions: boolean;
   overrideInstructionsText: string | null;
+  claudeBillingHeaderMode: ClaudeBillingHeaderMode;
   logRequestBodies: boolean;
   debugSse: boolean;
   sseFailureDebugEnabled: boolean;
@@ -127,6 +129,22 @@ export function parsePromptCacheRetention(value: string | undefined): 'in_memory
     `Ignoring unsupported PROXY_PROMPT_CACHE_RETENTION value ${JSON.stringify(value)}; expected "in_memory" or "24h"`,
   );
   return null;
+}
+
+export function parseClaudeBillingHeaderMode(value: string | undefined): ClaudeBillingHeaderMode {
+  if (value === undefined || value.trim() === '') {
+    return 'strip_line';
+  }
+
+  const normalized = value.trim().toLowerCase().replace(/-/g, '_');
+  if (normalized === 'strip_line' || normalized === 'strip_cch') {
+    return normalized;
+  }
+
+  console.warn(
+    `Ignoring unsupported PROXY_CLAUDE_BILLING_HEADER_MODE value ${JSON.stringify(value)}; expected "strip_line" or "strip_cch"`,
+  );
+  return 'strip_line';
 }
 
 export const defaultCompatFallbackPatterns = [
@@ -334,6 +352,7 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
   const convertSystemToDeveloper = isEnabled(env.PROXY_CONVERT_SYSTEM_TO_DEVELOPER, true);
   const clearInstructions = isEnabled(env.PROXY_CLEAR_INSTRUCTIONS);
   const overrideInstructionsText = env.PROXY_OVERRIDE_INSTRUCTIONS_TEXT ?? null;
+  const claudeBillingHeaderMode = parseClaudeBillingHeaderMode(env.PROXY_CLAUDE_BILLING_HEADER_MODE);
   const logRequestBodies = isEnabled(env.PROXY_LOG_REQUEST_BODY);
   const debugSse = isEnabled(env.PROXY_DEBUG_SSE);
   const sseFailureDebugEnabled = isEnabled(env.PROXY_SSE_FAILURE_DEBUG);
@@ -397,6 +416,7 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
     convertSystemToDeveloper,
     clearInstructions,
     overrideInstructionsText,
+    claudeBillingHeaderMode,
     logRequestBodies,
     debugSse,
     sseFailureDebugEnabled,

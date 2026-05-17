@@ -5,6 +5,10 @@ import { randomUUID } from 'node:crypto';
 
 const MASKED = '***';
 
+const DEFAULT_ADMIN_ENV: Record<string, string> = {
+  PROXY_CLAUDE_BILLING_HEADER_MODE: 'strip_line',
+};
+
 type SecretEnvAction = 'keep' | 'replace' | 'clear';
 
 export type EnvEntry = {
@@ -142,6 +146,12 @@ export function readForAdmin(store: ConfigFileStore): AdminConfigView {
     value: isSecretKey(key) ? MASKED : value,
     secret: isSecretKey(key),
   }));
+
+  for (const [key, value] of Object.entries(DEFAULT_ADMIN_ENV)) {
+    if (!(key in envParsed)) {
+      env.push({ key, value, secret: false });
+    }
+  }
 
   const fallbackProviders: FallbackProviderView[] = (fallbackParsed.fallback_api_config ?? []).map(item => {
     const hasInlineKey = typeof item.api_key === 'string' && item.api_key.length > 0;
@@ -287,6 +297,13 @@ export function validateDraft(draft: unknown): { ok: true; warnings: string[] } 
       }
       if (!e.secretAction && typeof e.value !== 'string') {
         errors.push(`draft.env[${i}].value must be a string for non-secret entries`);
+      }
+      if (
+        e.key === 'PROXY_CLAUDE_BILLING_HEADER_MODE' &&
+        e.value !== undefined &&
+        !['strip_line', 'strip-line', 'strip_cch', 'strip-cch'].includes(String(e.value).trim().toLowerCase())
+      ) {
+        errors.push(`draft.env[${i}].value must be 'strip_line' or 'strip_cch' for PROXY_CLAUDE_BILLING_HEADER_MODE`);
       }
     }
   }

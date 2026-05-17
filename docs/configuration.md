@@ -179,9 +179,17 @@ PROXY_CLEAR_DEVELOPER_CONTENT=0
 PROXY_CLEAR_SYSTEM_CONTENT=0
 PROXY_CLEAR_INSTRUCTIONS=0
 PROXY_OVERRIDE_INSTRUCTIONS_TEXT=
+PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line
 ```
 
 Use these only when an upstream provider needs compatibility adjustments. `PROXY_CONVERT_SYSTEM_TO_DEVELOPER` is enabled by default.
+
+`PROXY_CLAUDE_BILLING_HEADER_MODE` handles Claude Code / Anthropic attribution lines that may be converted into OpenAI Responses `instructions` or system/developer input text by upstream gateways:
+
+- `strip_line` - default. Removes the whole `x-anthropic-billing-header: ...` line from `instructions` and system/developer text blocks, which keeps prompt prefixes stable for cache matching.
+- `strip_cch` - keeps the billing header line but removes only dynamic `cch=...` fields.
+
+User-role content is not sanitized by this setting, so pasted user text is left intact.
 
 ## Fallback Providers
 
@@ -256,6 +264,8 @@ PROXY_PROMPT_CACHE_KEY=stable-prefix-key
 Use `PROXY_PROMPT_CACHE_KEY` only for a stable prompt prefix key. Do not include timestamps, UUIDs, request IDs, or any other per-request entropy, or cache hit rates will collapse.
 
 Whether the provider actually honors these hints still depends on the upstream implementation.
+
+If clients reach this proxy through Claude Code-oriented gateways, keep `PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line` unless you have a specific reason to preserve attribution text. The dynamic Claude billing header often appears at the very start of `instructions`, before the stable system prompt, and can defeat prefix-based caching even when `prompt_cache_key` is stable.
 
 ## Debug Settings (Keep Off By Default)
 

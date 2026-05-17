@@ -122,6 +122,9 @@ async function main() {
     const apiKeyEntry = envArr.find((e) => e.key === 'PRIMARY_PROVIDER_API_KEY');
     assert.ok(apiKeyEntry, 'API key should appear in env');
     assert.equal(apiKeyEntry.value, '***', 'API key must be masked');
+    const billingModeEntry = envArr.find((e) => e.key === 'PROXY_CLAUDE_BILLING_HEADER_MODE');
+    assert.ok(billingModeEntry, 'Claude billing header mode should appear in admin env defaults');
+    assert.equal(billingModeEntry.value, 'strip_line', 'default billing header mode should strip the whole line');
     assert.equal(typeof getConfigBody.runtimeVersion, 'number', 'should have runtimeVersion');
     assert.ok(Array.isArray(getConfigBody.restartRequiredFields), 'should have restartRequiredFields');
 
@@ -160,6 +163,23 @@ async function main() {
     assert.equal(badValidateBody.valid, false, 'invalid draft should return valid:false');
     assert.ok(Array.isArray(badValidateBody.errors), 'invalid draft should list errors');
     assert.ok((badValidateBody.errors as string[]).length > 0, 'should have at least one error');
+
+    const invalidBillingModeRes = await fetch(`${baseUrl}/admin/config/validate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        env: [{ key: 'PROXY_CLAUDE_BILLING_HEADER_MODE', value: 'keep_everything' }],
+        fallbackProviders: [],
+        modelMappings: {},
+      }),
+    });
+    assert.equal(invalidBillingModeRes.status, 200);
+    const invalidBillingModeBody = (await invalidBillingModeRes.json()) as Record<string, unknown>;
+    assert.equal(invalidBillingModeBody.valid, false, 'invalid billing header mode should fail validation');
+    assert.ok(
+      (invalidBillingModeBody.errors as string[]).some(error => error.includes('PROXY_CLAUDE_BILLING_HEADER_MODE')),
+      'validation errors should mention billing header mode',
+    );
 
     console.log('=== 5. PUT /admin/config writes to correct (separated) paths and reloads ===');
     const putRes = await fetch(`${baseUrl}/admin/config`, {
