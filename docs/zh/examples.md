@@ -97,6 +97,16 @@ PROXY_PROMPT_CACHE_KEY=stable-summary-prefix
 
 `prompt_cache_key` 必须稳定，不要包含时间戳、UUID、request id 或任何每次请求都不同的值。
 
+## Claude Billing Header 兼容示例
+
+如果流量会先经过 Claude Code 相关网关，建议保持下面这个默认配置，让 prompt 前缀更稳定：
+
+```env
+PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line
+```
+
+`strip_line` 会删除整行 `x-anthropic-billing-header: ...`。只有在你确实需要保留 attribution 文本时，才建议改成 `strip_cch`，只删除动态 `cch=...` 字段。
+
 ## 什么时候用 `normalized`，什么时候用 `raw`
 
 如果你希望代理先解析并规范化上游 SSE 事件，再转发给客户端，使用 `normalized`：

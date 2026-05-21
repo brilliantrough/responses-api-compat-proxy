@@ -95,6 +95,16 @@ PROXY_PROMPT_CACHE_KEY=stable-summary-prefix
 
 Use a stable prompt prefix key. Do not include timestamps, UUIDs, request IDs, or any other per-request entropy.
 
+## Claude Billing Header Compatibility
+
+If traffic reaches the proxy through Claude Code-oriented gateways, keep the prompt prefix stable with:
+
+```env
+PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line
+```
+
+Use `strip_line` to remove the full `x-anthropic-billing-header: ...` line after gateway conversion. Use `strip_cch` only when you need to preserve the attribution text but still remove the dynamic `cch=...` field.
+
 ## Choosing `normalized` vs `raw`
 
 Use `normalized` when the client wants the proxy to parse and normalize upstream SSE events before forwarding them.

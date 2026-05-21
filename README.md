@@ -4,7 +4,7 @@
 
 A TypeScript compatibility proxy for working with upstream providers that expose OpenAI-style `/v1/responses` and `/v1/models` endpoints.
 
-It is designed for the real integration problems that show up after "OpenAI-compatible" stops being truly uniform: request normalization, JSON and SSE response handling, fallback routing, stream normalization, and runtime operations. It is not an official OpenAI project.
+It is designed for the real integration problems that show up after "OpenAI-compatible" stops being truly uniform: request normalization, JSON and SSE response handling, fallback routing, stream normalization, gateway-added attribution text, and runtime operations. It is not an official OpenAI project.
 
 Use it when direct upstream integration becomes painful because providers differ just enough to break assumptions around request shape, SSE event shape, timeout behavior, or day-2 operations like config edits and provider failover.
 
@@ -13,6 +13,7 @@ Use it when direct upstream integration becomes painful because providers differ
 - Proxy `POST /v1/responses` for JSON and streaming clients.
 - Proxy `GET /v1/models` with optional model alias exposure.
 - Normalize OpenAI Responses-style requests before forwarding upstream.
+- Strip Claude Code / Anthropic billing header text or dynamic `cch=...` fields from normalized prompt text so cacheable prompt prefixes stay stable across gateways.
 - Normalize SSE streams or pass them through in `raw` mode.
 - Fall back across multiple providers with cooldown and circuit-breaker behavior.
 - Inspect and edit runtime config locally through `/admin`.
@@ -75,6 +76,20 @@ Open the local admin pages:
 - `http://127.0.0.1:11234/admin/monitor`
 
 For the full first-run workflow, see `docs/quickstart.md`.
+
+## Claude Code Gateway Compatibility
+
+If requests reach this proxy through Claude Code-oriented gateways, `x-anthropic-billing-header: ...` attribution text can end up inside OpenAI Responses `instructions` or system/developer text blocks.
+
+That line often carries dynamic `cch=...` values, which can break prefix-based prompt caching even when `prompt_cache_key` itself is stable.
+
+Keep this compatibility setting enabled unless you have a reason to preserve the attribution text:
+
+```env
+PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line
+```
+
+`strip_line` is the default and removes the whole billing header line. If you need to keep the attribution text, use `strip_cch` to remove only the dynamic `cch=...` field. User-role content is left untouched. See `docs/configuration.md` for details.
 
 ## Docker Quick Start
 
