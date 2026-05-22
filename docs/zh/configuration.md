@@ -44,6 +44,8 @@ MODEL_MAP_PATH=./instances/proxy-11234/model-map.json
 - `PROXY_ENV_PATH`：告诉 `/admin` 后台该读写哪个 `.env`
 - `FALLBACK_CONFIG_PATH` / `MODEL_MAP_PATH`：通常应指向 gitignored 的运行时文件，而不是仓库里的 `*.example`
 
+仓库自带的 example 配置保留 `HOST=0.0.0.0`，这样同一套运行时文件也可以直接用于 Docker。若只是本机首次试跑且不希望 API 对局域网开放，可改成 `HOST=127.0.0.1`。
+
 ### 需要重启才生效的字段
 
 `PORT` 或 `HOST` 改动后，runtime reload 会检测到，但仍然需要完整重启进程才会真正生效。管理后台会把这些字段列在 `restartRequiredFields` 中，并显示重启提示。
@@ -59,10 +61,10 @@ MODEL_MAP_PATH=./instances/proxy-11234/model-map.json
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `PORT` | `11234` | 监听端口 |
-| `HOST` | `0.0.0.0` | 监听地址 |
+| `HOST` | `0.0.0.0` | 监听地址。若只是本机首次试跑且不走 Docker，可改成 `127.0.0.1` |
 | `INSTANCE_NAME` | `responses-proxy-${PORT}` | 日志、captures、admin 中显示的实例名 |
 | `PROXY_ENV_PATH` | `.env` | 启动和 admin 编辑时使用的 `.env` 路径 |
-| `PROXY_ADMIN_ALLOW_HOST` | `0` | 显式开启时允许非 localhost 访问 `/admin`，主要用于 Docker 宿主机访问 |
+| `PROXY_ADMIN_ALLOW_HOST` | `0` | 显式开启时允许非 localhost 访问 `/admin`；此时应确保端口只暴露在受信网络内 |
 | `FALLBACK_CONFIG_PATH` | `config.json` | fallback provider JSON 路径 |
 | `MODEL_MAP_PATH` | `model-map.json` | 模型映射 JSON 路径 |
 | `PROXY_MAX_CONCURRENT_REQUESTS` | `512` | 最大并发请求数 |
@@ -71,7 +73,7 @@ MODEL_MAP_PATH=./instances/proxy-11234/model-map.json
 
 仓库中的 `instances/example-*` 是模板。真实部署请复制到 gitignored 的运行时目录，例如 `instances/proxy-11234/.env`、`instances/proxy-11234/fallback.json`、`instances/proxy-11234/model-map.json`。
 
-`PROXY_ADMIN_ALLOW_HOST=1` 主要用于 Docker 场景：服务发布到宿主机 `127.0.0.1`，同时希望宿主机浏览器访问 `/admin`。默认保持关闭即可，保持原有 localhost-only 行为。
+`PROXY_ADMIN_ALLOW_HOST=1` 主要用于 Docker 场景：服务发布到宿主机 `127.0.0.1`，同时希望宿主机浏览器访问 `/admin`。开启后，非 localhost 的 `/admin` 请求也会被接受，因此要继续保持端口只绑定在受信主机上，或自行加一层外部保护。
 
 ### 超时参数
 

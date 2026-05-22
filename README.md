@@ -19,6 +19,11 @@ Use it when direct upstream integration becomes painful because providers differ
 - Inspect and edit runtime config locally through `/admin`.
 - Watch provider health and proxy activity through `/admin/monitor`.
 
+## Requirements
+
+- `Node 22+` and `npm` are recommended for local runs.
+- If you want the fewest local prerequisites, start with the Docker quick start.
+
 ## Quick Start
 
 Install dependencies and create a local runtime instance from the tracked example files:
@@ -30,6 +35,8 @@ cp instances/proxy-11234/.env.example instances/proxy-11234/.env
 cp instances/proxy-11234/fallback.json.example instances/proxy-11234/fallback.json
 cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.json
 ```
+
+The tracked `fallback.json.example` starts empty on purpose. Add fallback providers later only if you want multi-provider failover.
 
 Edit `instances/proxy-11234/.env` and fill at least these required fields:
 
@@ -45,6 +52,8 @@ Optional but commonly changed:
 PRIMARY_PROVIDER_DEFAULT_MODEL=my-model-v2
 PORT=11234
 ```
+
+The shipped `.env.example` keeps `HOST=0.0.0.0` so the same runtime files also work in Docker. For a local-only first run outside Docker, change it to `HOST=127.0.0.1`.
 
 Build and start the proxy with that instance configuration loaded:
 
@@ -153,7 +162,7 @@ The built-in admin UI is available at `http://127.0.0.1:<PORT>/admin`.
 
 - `/admin` lets you inspect and edit `.env`, fallback config, and model mappings.
 - `/admin/monitor` shows provider health, circuit-breaker state, and recent request activity.
-- All `/admin` routes are localhost-only.
+- By default, `/admin` routes only accept localhost connections. If you set `PROXY_ADMIN_ALLOW_HOST=1`, non-localhost requests are allowed too, so keep that port on a trusted host.
 - Secret values are masked and require explicit replacement.
 - Changes to `PORT` or `HOST` still require a full process restart.
 
@@ -183,6 +192,10 @@ The built-in admin UI is available at `http://127.0.0.1:<PORT>/admin`.
 - Admin routes are intended for local or trusted-network use only. Do not expose them directly to the public internet.
 - Prompt cache keys must be stable. Do not include timestamps, random IDs, or request IDs.
 - Debug capture directories can contain full prompts and provider responses. Keep debug toggles off unless actively investigating an issue.
+
+## Friendly Links
+
+- [linux.do](https://linux.do)
 
 ## License
 

@@ -2,6 +2,11 @@
 
 This guide gets a local proxy instance running from a clean checkout with public-safe example files.
 
+## Requirements
+
+- `Node 22+` and `npm` are recommended for local runs.
+- If you want the fewest local prerequisites, use the Docker path in `README.md` or `docs/operations.md` instead.
+
 ## 1. Install Dependencies
 
 ```bash
@@ -20,6 +25,8 @@ cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.
 ```
 
 `instances/proxy-11234/` is gitignored. Keep your real credentials there, not in tracked example files.
+
+The tracked `fallback.json.example` starts with an empty `fallback_api_config` so your first run does not accidentally call placeholder fallback domains.
 
 ## 3. Fill the Required Provider Fields
 
@@ -44,6 +51,8 @@ The example file already includes:
 - `MODEL_MAP_PATH=./instances/proxy-11234/model-map.json`
 
 That keeps the admin UI pointed at the same runtime files you started with.
+
+The shipped `.env.example` also keeps `HOST=0.0.0.0` so the same runtime files work in Docker. For a local-only first run outside Docker, set `HOST=127.0.0.1`.
 
 ## 4. Build and Start
 
@@ -94,7 +103,7 @@ In `normalized` mode, you should see Responses-style SSE events such as `respons
 - Config UI: `http://127.0.0.1:11234/admin`
 - Provider monitor: `http://127.0.0.1:11234/admin/monitor`
 
-Both are localhost-only. Remote requests receive `403 Forbidden`.
+By default both are localhost-only and remote requests receive `403 Forbidden`. If you later enable `PROXY_ADMIN_ALLOW_HOST=1`, non-localhost requests are accepted too, so keep the published port on a trusted host.
 
 ## Recommended Starting Values
 

@@ -97,6 +97,8 @@ npm run proxy:start
 env $(grep -v '^#' instances/proxy-11234/.env | xargs) npm run proxy:start
 ```
 
+如果你使用仓库里的 `run.sh`，要注意它只会串起 `build + proxy:start`，并沿用当前 shell 环境；它不会替你加载某个实例目录下的 `.env`。
+
 ---
 
 ## 开发模式命令
@@ -171,7 +173,9 @@ http://127.0.0.1:<PORT>/admin
 - `::1`
 - `::ffff:127.0.0.1`
 
-远程访问会得到 `403 Forbidden`。如果你需要远程访问，建议使用 SSH tunnel 或带认证的本地反代。不要直接把 `/admin` 暴露到公网。
+远程访问会得到 `403 Forbidden`。
+
+如果显式开启 `PROXY_ADMIN_ALLOW_HOST=1`，非 localhost 请求也会被接受。仓库自带的 Docker compose 示例就是通过这个开关，配合宿主机 `127.0.0.1` 端口绑定，让宿主机浏览器访问 `/admin` 而不把它暴露到更广的网络。若你需要更广范围访问，建议使用 SSH tunnel 或带认证的本地反代。不要直接把 `/admin` 暴露到公网。
 
 ### UI 页面内容
 
@@ -224,7 +228,7 @@ http://127.0.0.1:<PORT>/admin/monitor
 - 最近失败原因
 - 活跃请求趋势
 
-监控页面通过 `GET /admin/monitor/stats` 每秒轮询一次，但这个 stats 路由本身不会每秒写一条日志。
+监控页面通过 `GET /admin/monitor/stats` 每秒轮询一次。默认 admin 策略下，这个 stats 路由也只允许 localhost 访问；如果开启了 `PROXY_ADMIN_ALLOW_HOST=1`，同样需要遵守受信网络边界。这个 stats 路由本身不会每秒写一条日志。
 
 ### Restart Required 提示
 
@@ -290,6 +294,8 @@ PROXY_ENV_PATH=./instances/proxy-11234/.env
 FALLBACK_CONFIG_PATH=./instances/proxy-11234/fallback.json
 MODEL_MAP_PATH=./instances/proxy-11234/model-map.json
 ```
+
+仓库里的 `fallback.json.example` 默认是空的，只有在你真的需要多上游 failover 时再补 fallback provider 即可。
 
 ### 启动 compose
 

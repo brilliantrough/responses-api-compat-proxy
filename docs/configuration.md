@@ -44,6 +44,8 @@ MODEL_MAP_PATH=./instances/proxy-11234/model-map.json
 - `PROXY_ENV_PATH` tells the admin config API which `.env` file to read and write.
 - `FALLBACK_CONFIG_PATH` and `MODEL_MAP_PATH` should usually point at gitignored runtime files, not tracked `*.example` files.
 
+The shipped example keeps `HOST=0.0.0.0` so the same runtime files also work in Docker. For a local-only first run outside Docker, set `HOST=127.0.0.1`.
+
 ### Restart-Required Fields
 
 Changes to `PORT` or `HOST` are detected at runtime reload but require a full process restart to take effect. When the admin UI or reload endpoint detects these changes, `restartRequiredFields` lists them and the UI shows a restart-required notice.
@@ -59,10 +61,10 @@ Most users should leave these alone on the first run.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `11234` | Listener port. |
-| `HOST` | `0.0.0.0` | Listener host. |
+| `HOST` | `0.0.0.0` | Listener host. Use `127.0.0.1` for a local-only first run outside Docker. |
 | `INSTANCE_NAME` | `responses-proxy-${PORT}` | Logical instance name for logs, captures, and admin output. |
 | `PROXY_ENV_PATH` | `.env` | `.env` file used by startup and admin editing. |
-| `PROXY_ADMIN_ALLOW_HOST` | `0` | Allow non-localhost admin access when explicitly enabled, intended for Docker-style host access. |
+| `PROXY_ADMIN_ALLOW_HOST` | `0` | Allow non-localhost `/admin` requests when explicitly enabled; keep the published port on a trusted host. |
 | `FALLBACK_CONFIG_PATH` | `config.json` | Fallback provider JSON path. |
 | `MODEL_MAP_PATH` | `model-map.json` | Model mapping JSON path. |
 | `PROXY_MAX_CONCURRENT_REQUESTS` | `512` | Maximum active proxy requests before overload rejection. |
@@ -71,7 +73,7 @@ Most users should leave these alone on the first run.
 
 The tracked example directories under `instances/example-*` are templates. Real deployments should copy them to gitignored runtime files such as `instances/proxy-11234/.env`, `instances/proxy-11234/fallback.json`, and `instances/proxy-11234/model-map.json`.
 
-`PROXY_ADMIN_ALLOW_HOST=1` is mainly intended for Docker deployments that publish the proxy to `127.0.0.1` on the host and want the host browser to access `/admin`. Leave it disabled for the default localhost-only admin behavior.
+`PROXY_ADMIN_ALLOW_HOST=1` is mainly intended for Docker deployments that publish the proxy to `127.0.0.1` on the host and want the host browser to access `/admin`. When enabled, non-localhost `/admin` requests are accepted too, so keep that port bound to a trusted host or add external protection.
 
 ### Timeout Settings
 

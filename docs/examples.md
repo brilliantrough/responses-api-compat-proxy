@@ -73,6 +73,8 @@ FALLBACK_B_API_KEY=your_fallback_b_api_key_here
 
 Use `api_key_env` so secrets stay in local env files instead of tracked JSON.
 
+The tracked `instances/example-*` templates intentionally ship with an empty `fallback_api_config` so first-run users do not hit placeholder fallback domains by accident.
+
 ## Prompt Cache Hints
 
 Request body:

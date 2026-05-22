@@ -80,7 +80,7 @@ The `.gitignore` excludes `instances/proxy-*/` so that real instance directories
 | `npm run proxy:start` | Run the compiled proxy from `dist/json-proxy.js`. Uses environment variables for configuration. |
 | `npm run proxy` | Run the proxy through `tsx` without a separate compile step (convenience alias). |
 
-Production deployments normally run `npm run build` first, then `npm run proxy:start`. The `run.sh` wrapper script handles both steps.
+Production deployments normally run `npm run build` first, then `npm run proxy:start`. The `run.sh` wrapper script handles those two steps against the current shell environment, but it does not load an instance `.env` file for you.
 
 For a single local instance, you can also load an instance `.env` file explicitly:
 
@@ -190,7 +190,9 @@ http://127.0.0.1:<PORT>/admin
 
 ### Localhost-Only Constraint
 
-All `/admin` endpoints (including the UI and API) are restricted to localhost connections (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`). Remote connections receive `403 Forbidden`. This constraint cannot be relaxed via configuration. If you need remote access, use an SSH tunnel or a local reverse proxy with authentication. Do not expose `/admin` directly to the public internet.
+By default, all `/admin` endpoints (including the UI and API) are restricted to localhost connections (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`). Remote connections receive `403 Forbidden`.
+
+If `PROXY_ADMIN_ALLOW_HOST=1` is enabled, non-localhost requests are accepted too. The bundled Docker compose path uses this together with a `127.0.0.1` host port binding so the host browser can reach `/admin` without publishing it more broadly. If you need wider access, prefer an SSH tunnel or a local reverse proxy with authentication. Do not expose `/admin` directly to the public internet.
 
 ### UI Sections
 
@@ -247,7 +249,7 @@ http://127.0.0.1:<PORT>/admin/monitor
 
 The monitor shows global proxy counters, provider circuit-breaker state, cooldown remaining, failure/success counts, recent failure reason, and a lightweight in-browser active-request trend.
 
-The monitor polls `GET /admin/monitor/stats` once per second while the browser tab is visible. This endpoint is localhost-only and intentionally quiet: it does not write one log line per poll. Samples are kept only in browser memory for lightweight one-minute trends.
+The monitor polls `GET /admin/monitor/stats` once per second while the browser tab is visible. Under the default admin policy this endpoint is localhost-only; if `PROXY_ADMIN_ALLOW_HOST=1` is enabled, the same trusted-host warning applies here too. It is intentionally quiet and does not write one log line per poll. Samples are kept only in browser memory for lightweight one-minute trends.
 
 ### Restart-Required Notice
 
@@ -315,6 +317,8 @@ PROXY_ENV_PATH=./instances/proxy-11234/.env
 FALLBACK_CONFIG_PATH=./instances/proxy-11234/fallback.json
 MODEL_MAP_PATH=./instances/proxy-11234/model-map.json
 ```
+
+The tracked `fallback.json.example` is empty on purpose. Add fallback providers only when you actually want multi-provider failover.
 
 ### Start Docker Compose
 

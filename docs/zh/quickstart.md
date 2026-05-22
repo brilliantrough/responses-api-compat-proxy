@@ -4,6 +4,11 @@
 
 [English](../quickstart.md) | [中文](./quickstart.md)
 
+## 环境要求
+
+- 本地运行建议使用 `Node 22+` 和 `npm`
+- 如果你想先减少本地环境准备，建议直接走 `README.md` 或 `docs/operations.md` 里的 Docker 路径
+
 ## 1. 安装依赖
 
 ```bash
@@ -22,6 +27,8 @@ cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.
 ```
 
 `instances/proxy-11234/` 已被 `.gitignore` 忽略。真实凭据请放在这里，不要写进仓库跟踪的 example 文件里。
+
+仓库里的 `fallback.json.example` 默认是空的 `fallback_api_config`，这样第一次跑通时不会误打到占位 fallback 域名。
 
 ## 3. 填写必需的上游 provider 字段
 
@@ -46,6 +53,8 @@ PRIMARY_PROVIDER_DEFAULT_MODEL=my-model-v2
 - `MODEL_MAP_PATH=./instances/proxy-11234/model-map.json`
 
 这样 `/admin` 后台会直接读写你当前这套运行时配置文件。
+
+示例 `.env.example` 默认保留 `HOST=0.0.0.0`，这样同一套运行时文件也能直接用于 Docker。若你只是本机首次试跑且不想对局域网开放 API，可以改成 `HOST=127.0.0.1`。
 
 ## 4. 构建并启动
 
@@ -96,7 +105,7 @@ curl -N http://127.0.0.1:11234/v1/responses \
 - 配置页面：`http://127.0.0.1:11234/admin`
 - provider 监控页面：`http://127.0.0.1:11234/admin/monitor`
 
-这两个页面默认都只允许 localhost 访问，远程请求会收到 `403 Forbidden`。
+这两个页面默认都只允许 localhost 访问，远程请求会收到 `403 Forbidden`。如果你后续显式开启 `PROXY_ADMIN_ALLOW_HOST=1`，非 localhost 请求也会被接受，此时应确保端口只暴露在受信网络内。
 
 ## 推荐起步参数
 

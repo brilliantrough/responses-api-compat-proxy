@@ -75,6 +75,8 @@ FALLBACK_B_API_KEY=your_fallback_b_api_key_here
 
 建议优先使用 `api_key_env`，这样真实密钥仍保存在本地 env 文件里，而不是跟踪到 JSON 中。
 
+仓库里的 `instances/example-*` 模板默认把 `fallback_api_config` 设为空，避免第一次部署时误打到占位 fallback 域名。
+
 ## Prompt Cache Hints
 
 请求体：
