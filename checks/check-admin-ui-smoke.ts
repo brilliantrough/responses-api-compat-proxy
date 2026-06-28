@@ -103,10 +103,36 @@ async function main() {
       'runtime-table',
       'btn-validate', 'btn-save', 'btn-reload', 'btn-rollback',
       'validation-result', 'action-result',
+      'instance-summary', 'topbar-runtime-version', 'topbar-active-requests',
     ];
     for (const id of requiredIds) {
       assert.ok(html.includes(id), `HTML should contain element id="${id}"`);
     }
+
+    console.log('=== 2b. HTML renders the redesigned shared admin shell ===');
+    const requiredShellClasses = [
+      'admin-shell',
+      'topbar',
+      'content-grid',
+      'config-column',
+      'status-column',
+    ];
+    for (const cls of requiredShellClasses) {
+      assert.ok(
+        html.includes(cls),
+        `admin page should render the shared admin shell class "${cls}"`,
+      );
+    }
+
+    console.log('=== 2c. HTML renders the redesigned notice and status panel structure ===');
+    assert.ok(
+      html.includes('status-panel'),
+      'admin page should render the read-only status panel',
+    );
+    assert.ok(
+      html.includes('panel-title'),
+      'admin page should render compact panel titles',
+    );
 
     console.log('=== 3. JS loads and references key behaviors ===');
     const jsRes = await fetch(`${baseUrl}/admin/assets/admin.js`);
@@ -126,6 +152,24 @@ async function main() {
     assert.ok(js.includes('disableCooldown'), 'JS should handle fallback disableCooldown');
     assert.ok(js.includes('PROXY_CLAUDE_BILLING_HEADER_MODE'), 'JS should expose Claude billing header mode');
     assert.ok(js.includes('strip_cch'), 'JS should offer strip_cch mode');
+
+    console.log('=== 3b. JS safely renders overview fields and resets action notices ===');
+    assert.ok(!js.includes('info.innerHTML'), 'overview renderer should not build read-only fields with HTML strings');
+    assert.ok(js.includes("info.textContent = ''"), 'overview renderer should clear stale rows before rendering');
+    assert.ok(js.includes('appendOverviewField'), 'overview renderer should construct fields through DOM nodes');
+    assert.ok(js.includes('clearActionResult'), 'action handlers should clear result text and notice classes together');
+
+    console.log('=== 3c. JS uses the redesigned model mapping editor structure ===');
+    assert.ok(js.includes('mapping-row'), 'model mapping renderer should use the redesigned mapping row class');
+    assert.ok(js.includes('mapping-arrow'), 'model mapping renderer should render the visual mapping arrow');
+
+    console.log('=== 3d. JS uses the redesigned provider/fallback editor structure ===');
+    assert.ok(js.includes('fallback-row'), 'fallback renderer should emit redesigned fallback rows');
+
+    console.log('=== 3e. JS keeps fallback dirty and inline secret UI state consistent ===');
+    assert.ok(js.includes('normalizeFallbackForDirty'), 'fallback dirty checks should normalize inline and non-inline secret action semantics');
+    assert.ok(!js.includes("secretAction: 'keep', disableCooldown"), 'non-inline fallback rows should not compare against synthetic keep secretAction values');
+    assert.ok(js.includes('actionSel.value = draftFallback[idx].secretAction'), 'typing an inline replacement secret should update the visible action select');
 
     console.log('=== 4. CSS has required styles ===');
     const cssRes = await fetch(`${baseUrl}/admin/assets/admin.css`);

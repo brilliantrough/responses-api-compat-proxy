@@ -7,63 +7,75 @@
 <link rel="stylesheet" href="/admin/assets/admin.css">
 </head>
 <body>
-<div class="container">
-  <h1>Admin Config <span id="dirty-badge" class="badge badge-ok" style="display:none">Unsaved changes</span></h1>
-  <div id="status">Loading...</div>
-  <div id="restart-notice" style="display:none"></div>
-
-  <div class="section">
-    <div class="section-header">Overview</div>
-    <div class="section-body">
-      <div class="field-group"><label>Runtime Version</label><input id="ov-version" readonly></div>
-      <div class="field-group"><label>Restart Required Fields</label><input id="ov-restart" readonly></div>
-      <div id="ov-instance-info"></div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-header">Providers</div>
-    <div class="section-body">
-      <h3 style="margin:0 0 0.5rem;font-size:0.95rem">Primary Provider (env)</h3>
-      <table id="primary-table"><thead><tr><th>Key</th><th>Value</th><th>Secret</th></tr></thead><tbody></tbody></table>
-      <div class="subsection-heading">
-        <h3>Fallback Providers</h3>
-        <button id="btn-add-fallback" type="button">+ Add Fallback</button>
+<div class="admin-shell">
+  <header class="topbar">
+    <div class="topbar-main">
+      <div class="topbar-identity">
+        <h1>Admin Config</h1>
+        <div id="instance-summary" class="meta-row">Loading instance...</div>
       </div>
-      <table id="fallback-table"><thead><tr><th>Move</th><th>Name</th><th>Base URL</th><th>Key Mode</th><th>Key Env</th><th>No cooldown</th><th>Configured</th><th>Actions</th></tr></thead><tbody></tbody></table>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-header">Model Mappings</div>
-    <div class="section-body">
-      <div id="model-mappings-list"></div>
-      <div class="btn-row" style="margin-top:0.5rem">
-        <button id="btn-add-mapping">+ Add Mapping</button>
+      <div class="topbar-status">
+        <span id="dirty-badge" class="badge badge-ok" style="display:none">Unsaved changes</span>
+        <span id="topbar-runtime-version" class="badge">Runtime -</span>
+        <span id="topbar-active-requests" class="badge">Active -</span>
       </div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-header">Runtime / Compatibility</div>
-    <div class="section-body">
-      <table id="runtime-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody></tbody></table>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-header">Review &amp; Apply</div>
-    <div class="section-body">
-      <div id="validation-result"></div>
-      <div class="btn-row">
+      <div class="topbar-actions btn-row">
         <button id="btn-validate" class="primary">Validate</button>
-        <button id="btn-save" class="primary">Save</button>
         <button id="btn-reload" class="warning">Reload</button>
         <button id="btn-rollback" class="danger">Rollback</button>
+        <button id="btn-save" class="primary">Save</button>
       </div>
-      <div id="action-result"></div>
     </div>
-  </div>
+    <div id="status" class="notice notice-info">Loading...</div>
+    <div id="restart-notice" style="display:none"></div>
+    <div id="validation-result"></div>
+    <div id="action-result"></div>
+  </header>
+
+  <main class="content-grid">
+    <section class="config-column">
+      <div class="section">
+        <div class="section-header">Providers</div>
+        <div class="section-body">
+          <h3 class="subsection-title">Primary Provider (env)</h3>
+          <table id="primary-table"><thead><tr><th>Key</th><th>Value</th><th>Secret</th></tr></thead><tbody></tbody></table>
+          <div class="subsection-heading">
+            <h3>Fallback Providers</h3>
+            <button id="btn-add-fallback" type="button">+ Add Fallback</button>
+          </div>
+          <table id="fallback-table"><thead><tr><th>Move</th><th>Name</th><th>Base URL</th><th>Key Mode</th><th>Key Env</th><th>No cooldown</th><th>Configured</th><th>Actions</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">Model Mappings</div>
+        <div class="section-body">
+          <div id="model-mappings-list"></div>
+          <div class="btn-row section-footer">
+            <button id="btn-add-mapping">+ Add Mapping</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">Runtime / Compatibility</div>
+        <div class="section-body">
+          <table id="runtime-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <aside class="status-column">
+      <div class="status-panel">
+        <div class="panel-title">Overview</div>
+        <div class="panel-body">
+          <div class="field-group"><label>Runtime Version</label><input id="ov-version" readonly></div>
+          <div class="field-group"><label>Restart Required Fields</label><input id="ov-restart" readonly></div>
+          <div id="ov-instance-info"></div>
+        </div>
+      </div>
+    </aside>
+  </main>
 </div>
 <script src="/admin/assets/admin.js"></script>
 </body>

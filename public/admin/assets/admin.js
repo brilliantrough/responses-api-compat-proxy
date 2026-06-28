@@ -4,6 +4,9 @@
   var restartNotice = document.getElementById('restart-notice');
   var validationResult = document.getElementById('validation-result');
   var actionResult = document.getElementById('action-result');
+  var instanceSummary = document.getElementById('instance-summary');
+  var topbarRuntimeVersion = document.getElementById('topbar-runtime-version');
+  var topbarActiveRequests = document.getElementById('topbar-active-requests');
 
   var serverConfig = null;
   var serverMeta = null;
@@ -110,13 +113,27 @@
 
   function setStatus(text, isError) {
     statusEl.textContent = text;
-    statusEl.className = isError ? 'error' : '';
+    statusEl.className = isError ? 'notice notice-error' : 'notice notice-info';
   }
 
   function setDirty(v) {
     dirty = v;
     dirtyBadge.style.display = v ? 'inline-block' : 'none';
     dirtyBadge.className = v ? 'badge badge-dirty' : 'badge badge-ok';
+  }
+
+  function normalizeFallbackForDirty(p) {
+    var normalized = {
+      name: p.name,
+      baseUrl: p.baseUrl,
+      apiKeyMode: p.apiKeyMode,
+      apiKeyEnv: p.apiKeyMode === 'env' ? p.apiKeyEnv : undefined,
+      disableCooldown: p.disableCooldown === true
+    };
+    if (p.apiKeyMode === 'inline') {
+      normalized.secretAction = p.secretAction || 'keep';
+    }
+    return normalized;
   }
 
   function checkDirty() {
@@ -134,20 +151,35 @@
       return { key: e.key, value: e.value };
     });
     var envChanged = JSON.stringify(curEnv) !== JSON.stringify(origEnv);
-    var fbChanged = JSON.stringify(draftFallback.map(function(p) {
-      return { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode, apiKeyEnv: p.apiKeyEnv, secretAction: p.secretAction, disableCooldown: p.disableCooldown === true };
-    })) !== JSON.stringify(serverConfig.fallbackProviders.map(function(p) {
-      return { name: p.name, baseUrl: p.baseUrl, apiKeyMode: p.apiKeyMode, apiKeyEnv: p.apiKeyEnv, secretAction: 'keep', disableCooldown: p.disableCooldown === true };
-    }));
+    var fbChanged = JSON.stringify(draftFallback.map(normalizeFallbackForDirty)) !== JSON.stringify(serverConfig.fallbackProviders.map(normalizeFallbackForDirty));
     var mmChanged = JSON.stringify(draftModelMappings) !== JSON.stringify(serverConfig.modelMappings);
     setDirty(envChanged || fbChanged || mmChanged);
+  }
+
+  function getEnvValue(key) {
+    var envArr = (serverConfig && serverConfig.env) || [];
+    var entry = envArr.filter(function(e) { return e.key === key; })[0];
+    return entry ? entry.value : '';
+  }
+
+  function renderTopbarSummary() {
+    if (!serverConfig || !serverMeta) return;
+    var instanceName = getEnvValue('INSTANCE_NAME') || 'Unknown instance';
+    var primaryProviderName = getEnvValue('PRIMARY_PROVIDER_NAME') || 'No provider';
+    var host = getEnvValue('HOST');
+    var port = getEnvValue('PORT');
+    var address = [host, port ? ':' + port : ''].filter(Boolean).join('');
+    instanceSummary.textContent = [instanceName, primaryProviderName, address].filter(Boolean).join(' | ');
+    var activeRequests = typeof serverMeta.activeRequests === 'number' ? serverMeta.activeRequests : '-';
+    topbarRuntimeVersion.textContent = 'Runtime ' + (serverMeta.runtimeVersion || '-');
+    topbarActiveRequests.textContent = 'Active ' + activeRequests;
   }
 
   function showRestartNotice(fields) {
     if (fields && fields.length > 0) {
       var hasPortHost = fields.some(function(f) { return f === 'PORT' || f === 'HOST'; });
       restartNotice.style.display = 'block';
-      restartNotice.className = hasPortHost ? 'notice-restart' : 'notice-error';
+      restartNotice.className = hasPortHost ? 'notice notice-warning notice-restart' : 'notice notice-error';
       restartNotice.textContent = hasPortHost
         ? 'Restart required: ' + fields.join(', ') + ' changed. Restart the proxy process for these to take effect.'
         : 'Fields changed: ' + fields.join(', ');
@@ -156,18 +188,32 @@
     }
   }
 
+  function appendOverviewField(container, label, value) {
+    var group = document.createElement('div');
+    group.className = 'field-group';
+    var labelEl = document.createElement('label');
+    labelEl.textContent = label;
+    var input = document.createElement('input');
+    input.readOnly = true;
+    input.value = value == null ? '' : String(value);
+    group.appendChild(labelEl);
+    group.appendChild(input);
+    container.appendChild(group);
+  }
+
   function renderOverview() {
     document.getElementById('ov-version').value = serverMeta.runtimeVersion || '-';
     document.getElementById('ov-restart').value = (serverMeta.restartRequiredFields || []).join(', ') || '(none)';
     var info = document.getElementById('ov-instance-info');
+    info.textContent = '';
     var envArr = serverConfig.env || [];
     var inst = envArr.filter(function(e) { return e.key === 'INSTANCE_NAME'; })[0];
     var port = envArr.filter(function(e) { return e.key === 'PORT'; })[0];
     if (inst) {
-      info.innerHTML = '<div class="field-group"><label>Instance</label><input readonly value="' + esc(inst.value) + '"></div>';
+      appendOverviewField(info, 'Instance', inst.value);
     }
     if (port) {
-      info.innerHTML += '<div class="field-group"><label>Port</label><input readonly value="' + esc(port.value) + '"></div>';
+      appendOverviewField(info, 'Port', port.value);
     }
   }
 
@@ -267,6 +313,7 @@
       (function(index) {
       var p = draftFallback[index];
       var tr = document.createElement('tr');
+      tr.className = 'fallback-row';
       tr.setAttribute('draggable', 'true');
       tr.addEventListener('dragstart', function(event) {
         if (armedFallbackDragIndex !== index) {
@@ -295,7 +342,7 @@
       });
 
       var tdMove = document.createElement('td');
-      tdMove.className = 'drag-cell';
+      tdMove.className = 'drag-cell fallback-row-control';
       var handle = document.createElement('button');
       handle.type = 'button';
       handle.className = 'drag-handle';
@@ -311,6 +358,7 @@
       tr.appendChild(tdMove);
 
       var tdName = document.createElement('td');
+      tdName.className = 'fallback-row-main';
       var nameInput = document.createElement('input');
       nameInput.type = 'text';
       nameInput.value = p.name;
@@ -323,6 +371,7 @@
       tr.appendChild(tdName);
 
       var tdUrl = document.createElement('td');
+      tdUrl.className = 'fallback-row-url';
       var urlInput = document.createElement('input');
       urlInput.type = 'text';
       urlInput.value = p.baseUrl;
@@ -335,6 +384,7 @@
       tr.appendChild(tdUrl);
 
       var tdMode = document.createElement('td');
+      tdMode.className = 'fallback-row-compact';
       var modeSelect = document.createElement('select');
       ['env', 'inline', 'none'].forEach(function(m) {
         var opt = document.createElement('option');
@@ -360,6 +410,7 @@
       tr.appendChild(tdMode);
 
       var tdEnv = document.createElement('td');
+      tdEnv.className = 'fallback-row-secret';
       if (p.apiKeyMode === 'env') {
         var envInput = document.createElement('input');
         envInput.type = 'text';
@@ -387,12 +438,13 @@
             draftFallback[idx].secretAction = 'keep';
             draftFallback[idx].value = undefined;
           }
+          actionSel.value = draftFallback[idx].secretAction;
           checkDirty();
         });
         inlineStack.appendChild(inlinePwd);
 
         var actionSel = document.createElement('select');
-        actionSel.style.marginTop = '0.3rem';
+        actionSel.className = 'inline-secret-action';
         ['keep', 'replace', 'clear'].forEach(function(a) {
           var opt = document.createElement('option');
           opt.value = a;
@@ -414,9 +466,7 @@
           checkDirty();
         });
         var actionLabel = document.createElement('div');
-        actionLabel.style.fontSize = '0.75rem';
-        actionLabel.style.color = '#888';
-        actionLabel.style.marginTop = '0.2rem';
+        actionLabel.className = 'inline-secret-label';
         actionLabel.textContent = 'Action:';
         actionLabel.appendChild(actionSel);
         inlineStack.appendChild(actionLabel);
@@ -428,6 +478,7 @@
       tr.appendChild(tdEnv);
 
       var tdDisableCooldown = document.createElement('td');
+      tdDisableCooldown.className = 'fallback-row-compact';
       var cooldownStack = document.createElement('div');
       cooldownStack.className = 'checkbox-stack';
       var cooldownCheckbox = document.createElement('input');
@@ -444,10 +495,15 @@
       tr.appendChild(tdDisableCooldown);
 
       var tdConf = document.createElement('td');
-      tdConf.textContent = p.apiKeyConfigured ? 'Yes' : 'No';
+      tdConf.className = 'fallback-row-status';
+      var configuredChip = document.createElement('span');
+      configuredChip.className = p.apiKeyConfigured ? 'fallback-chip fallback-chip-ok' : 'fallback-chip fallback-chip-muted';
+      configuredChip.textContent = p.apiKeyConfigured ? 'Yes' : 'No';
+      tdConf.appendChild(configuredChip);
       tr.appendChild(tdConf);
 
       var tdActions = document.createElement('td');
+      tdActions.className = 'fallback-row-actions-cell';
       var actions = document.createElement('div');
       actions.className = 'row-actions';
       var deleteBtn = document.createElement('button');
@@ -474,9 +530,9 @@
     for (var i = 0; i < keys.length; i++) {
       (function(alias, idx) {
         var row = document.createElement('div');
-        row.className = 'kv-row';
+        row.className = 'mapping-row';
         var aliasCol = document.createElement('div');
-        aliasCol.className = 'kv-col';
+        aliasCol.className = 'mapping-col';
         var aliasInput = document.createElement('input');
         aliasInput.type = 'text';
         aliasInput.value = alias;
@@ -489,19 +545,21 @@
           delete draftModelMappings[orig];
           draftModelMappings[newAlias] = target;
           this.dataset.origAlias = newAlias;
+          targetInput.dataset.origAlias = newAlias;
+          delBtn.dataset.alias = newAlias;
           checkDirty();
         });
         aliasCol.appendChild(aliasInput);
         appendHelperText(aliasCol, getModelMappingHelperText('alias'));
         row.appendChild(aliasCol);
 
-        var arrow = document.createElement('span');
-        arrow.className = 'kv-arrow';
-        arrow.textContent = ' \u2192 ';
+        var arrow = document.createElement('div');
+        arrow.className = 'mapping-arrow';
+        arrow.textContent = '\u2192';
         row.appendChild(arrow);
 
         var targetCol = document.createElement('div');
-        targetCol.className = 'kv-col';
+        targetCol.className = 'mapping-col';
         var targetInput = document.createElement('input');
         targetInput.type = 'text';
         targetInput.value = draftModelMappings[alias];
@@ -515,14 +573,20 @@
         appendHelperText(targetCol, getModelMappingHelperText('target'));
         row.appendChild(targetCol);
 
+        var actions = document.createElement('div');
+        actions.className = 'row-actions';
+
         var delBtn = document.createElement('button');
+        delBtn.className = 'icon-button';
         delBtn.textContent = 'x';
+        delBtn.dataset.alias = alias;
         delBtn.addEventListener('click', function() {
-          delete draftModelMappings[alias];
+          delete draftModelMappings[this.dataset.alias];
           renderModelMappings();
           checkDirty();
         });
-        row.appendChild(delBtn);
+        actions.appendChild(delBtn);
+        row.appendChild(actions);
         container.appendChild(row);
       })(keys[i], i);
     }
@@ -547,6 +611,7 @@
   }
 
   function render() {
+    renderTopbarSummary();
     renderOverview();
     renderPrimaryProvider();
     renderFallbackProviders();
@@ -606,9 +671,14 @@
     };
   }
 
+  function clearActionResult() {
+    actionResult.textContent = '';
+    actionResult.className = '';
+  }
+
   function showActionResult(text, isError) {
-    actionResult.innerHTML = '';
-    actionResult.className = isError ? 'notice-error' : 'notice-success';
+    clearActionResult();
+    actionResult.className = isError ? 'notice notice-error' : 'notice notice-success';
     actionResult.textContent = text;
   }
 
@@ -616,7 +686,7 @@
     validationResult.innerHTML = '';
     if (body.valid) {
       var div = document.createElement('div');
-      div.className = 'validation-result validation-valid';
+      div.className = 'validation-result notice notice-success validation-valid';
       div.textContent = 'Draft is valid.';
       if (body.warnings && body.warnings.length > 0) {
         div.textContent += ' Warnings: ' + body.warnings.join('; ');
@@ -624,7 +694,7 @@
       validationResult.appendChild(div);
     } else {
       var div = document.createElement('div');
-      div.className = 'validation-result validation-invalid';
+      div.className = 'validation-result notice notice-error validation-invalid';
       div.textContent = 'Validation errors:';
       var ul = document.createElement('ul');
       ul.className = 'validation-errors';
@@ -646,12 +716,27 @@
       var data = await res.json();
       if (!data.ok) throw new Error(data.error?.message || 'Unknown error');
       serverConfig = data.config;
-      serverMeta = { runtimeVersion: data.runtimeVersion, restartRequiredFields: data.restartRequiredFields || [] };
+      serverMeta = { runtimeVersion: data.runtimeVersion, restartRequiredFields: data.restartRequiredFields || [], activeRequests: null };
       initDraft();
       render();
+      await loadRuntimeStats();
       setStatus('Connected (runtimeVersion: ' + data.runtimeVersion + ')');
     } catch (err) {
       setStatus('Error: ' + err.message, true);
+    }
+  }
+
+  async function loadRuntimeStats() {
+    try {
+      var res = await fetch('/admin/stats');
+      if (!res.ok) return;
+      var data = await res.json();
+      if (typeof data.activeRequests === 'number') {
+        serverMeta.activeRequests = data.activeRequests;
+        renderTopbarSummary();
+      }
+    } catch (err) {
+      void err;
     }
   }
 
@@ -675,12 +760,12 @@
       var data = await res.json();
       showValidationResult(data);
     } catch (err) {
-      validationResult.innerHTML = '<div class="validation-result validation-invalid">' + esc(err.message) + '</div>';
+      validationResult.innerHTML = '<div class="validation-result notice notice-error validation-invalid">' + esc(err.message) + '</div>';
     }
   });
 
   document.getElementById('btn-save').addEventListener('click', async function() {
-    actionResult.innerHTML = '';
+    clearActionResult();
     try {
       var res = await fetch('/admin/config', {
         method: 'PUT',
@@ -700,7 +785,7 @@
   });
 
   document.getElementById('btn-reload').addEventListener('click', async function() {
-    actionResult.innerHTML = '';
+    clearActionResult();
     try {
       var res = await fetch('/admin/config/reload', { method: 'POST' });
       var data = await res.json();
@@ -716,7 +801,7 @@
   });
 
   document.getElementById('btn-rollback').addEventListener('click', async function() {
-    actionResult.innerHTML = '';
+    clearActionResult();
     try {
       var res = await fetch('/admin/config/rollback', { method: 'POST' });
       var data = await res.json();
