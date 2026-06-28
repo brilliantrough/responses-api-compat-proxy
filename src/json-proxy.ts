@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { bootstrapHttpProxySupport } from './http-proxy-bootstrap.js';
 import { createServer } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolve } from 'node:path';
@@ -39,6 +40,8 @@ import {
 import { createAdminHandler } from './admin-api.js';
 import { createConfigFileStoreFromPaths } from './config-files.js';
 import { createRuntimeConfigStore, createEndpointStateKey, type RuntimeSnapshot } from './runtime-config.js';
+
+bootstrapHttpProxySupport();
 
 const _envPath = process.env.PROXY_ENV_PATH ?? resolve('.env');
 const runtimeStore = createRuntimeConfigStore({ envPath: _envPath });
@@ -1384,6 +1387,73 @@ function extractTextLengthFromResponseObject(obj: JsonRecord): number {
   return total;
 }
 
+// Tool / function-call activity counts as meaningful output even though it
+// produces no output_text. Without this, a legitimate tool-call turn (common
+// for coding agents) would look "empty" once we stop trusting usage token
+// counts. We treat a stream as having produced a tool call when we observe a
+// function/tool/custom/mcp call item, or a function_call_arguments.* event.
+const TOOL_CALL_ITEM_TYPES = new Set([
+  'function_call',
+  'custom_tool_call',
+  'mcp_call',
+  'tool_call',
+  'computer_call',
+  'local_shell_call',
+  'code_interpreter_call',
+  'file_search_call',
+  'web_search_call',
+  'image_generation_call',
+]);
+
+function responseObjectHasToolCall(obj: JsonRecord): boolean {
+  if (!Array.isArray(obj.output)) {
+    return false;
+  }
+
+  for (const item of obj.output) {
+    if (isJsonRecord(item) && typeof item.type === 'string' && TOOL_CALL_ITEM_TYPES.has(item.type)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function payloadHasToolCall(payload: unknown): boolean {
+  if (!isJsonRecord(payload)) {
+    return false;
+  }
+
+  const eventType = typeof payload.type === 'string' ? payload.type : '';
+
+  if (eventType.startsWith('response.function_call_arguments') ||
+      eventType.startsWith('response.custom_tool_call') ||
+      eventType.startsWith('response.mcp_call')) {
+    return true;
+  }
+
+  if (
+    (eventType === 'response.output_item.added' || eventType === 'response.output_item.done') &&
+    isJsonRecord(payload.item) &&
+    typeof payload.item.type === 'string' &&
+    TOOL_CALL_ITEM_TYPES.has(payload.item.type)
+  ) {
+    return true;
+  }
+
+  if (
+    (eventType === 'response.completed' || eventType === 'response.output_item.done') &&
+    isJsonRecord(payload.response ?? payload.item)
+  ) {
+    const container = (payload.response ?? payload.item) as JsonRecord;
+    if (responseObjectHasToolCall(container)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function hasMeaningfulResponseOutput(responseObject: JsonRecord | undefined) {
   if (!responseObject || !Array.isArray(responseObject.output)) {
     return false;
@@ -1820,6 +1890,7 @@ async function probeAndPipeResponsesTextStream(
   let startedStreaming = false;
   let wroteAnyEvent = false;
   let wroteTextContent = false;
+  let wroteToolCall = false;
   let textCharCount = 0;
   const enforceFirstTextTimeout = getConfig().firstTextTimeoutMs > 0;
 
@@ -1892,6 +1963,10 @@ async function probeAndPipeResponsesTextStream(
             textCharCount += textLength;
             if (textLength > 0) {
               wroteTextContent = true;
+              clearFirstTextTimer();
+            }
+            if (payloadHasToolCall(parsedPayload)) {
+              wroteToolCall = true;
               clearFirstTextTimer();
             }
             normalizedEvent = {
@@ -2031,6 +2106,9 @@ async function probeAndPipeResponsesTextStream(
           const parsedPayload = parseStreamPayload(parsedEvent.data);
           if (parsedPayload !== undefined) {
             usage = extractUsageFromStreamPayload(parsedPayload, requestBody) ?? usage;
+            if (payloadHasToolCall(parsedPayload)) {
+              wroteToolCall = true;
+            }
             normalizedEvent = {
               event: parsedEvent.event,
               data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
@@ -2055,8 +2133,7 @@ async function probeAndPipeResponsesTextStream(
       addUsageToStats(usage);
     }
 
-    const usageOutputTokens = usage && typeof usage.outputTokens === 'number' ? usage.outputTokens : 0;
-    const effectiveWroteText = wroteTextContent || usageOutputTokens > 0;
+    const effectiveWroteText = wroteTextContent || wroteToolCall;
 
     if (!effectiveWroteText && !usage) {
       return {
@@ -2121,6 +2198,7 @@ async function pipeUpstreamSse(
   let startedStreaming = false;
   let wroteAnyEvent = false;
   let wroteTextContent = false;
+  let wroteToolCall = false;
   let textCharCount = 0;
   const pendingClientEvents: string[] = [];
 
@@ -2258,6 +2336,10 @@ async function pipeUpstreamSse(
                 wroteTextContent = true;
                 clearFirstTextTimer();
               }
+              if (payloadHasToolCall(parsedPayload)) {
+                wroteToolCall = true;
+                clearFirstTextTimer();
+              }
               normalizedEvent = {
                 event: parsedEvent.event,
                 data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
@@ -2268,7 +2350,7 @@ async function pipeUpstreamSse(
           }
 
           const formattedEvent = formatSseEvent(normalizedEvent);
-          if (wroteTextContent) {
+          if (wroteTextContent || wroteToolCall) {
             flushPendingClientEvents();
             writeSseChunk(formattedEvent);
           } else {
@@ -2277,7 +2359,7 @@ async function pipeUpstreamSse(
           wroteAnyEvent = true;
           streamEventCount += 1;
         } else {
-          if (wroteTextContent) {
+          if (wroteTextContent || wroteToolCall) {
             flushPendingClientEvents();
             writeSseChunk('\n');
           } else {
@@ -2370,6 +2452,9 @@ async function pipeUpstreamSse(
             if (textLength > 0) {
               wroteTextContent = true;
             }
+            if (payloadHasToolCall(parsedPayload)) {
+              wroteToolCall = true;
+            }
             normalizedEvent = {
               event: parsedEvent.event,
               data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
@@ -2380,7 +2465,7 @@ async function pipeUpstreamSse(
         }
 
         const formattedEvent = formatSseEvent(normalizedEvent);
-        if (wroteTextContent) {
+        if (wroteTextContent || wroteToolCall) {
           flushPendingClientEvents();
           writeSseChunk(formattedEvent);
         } else {
@@ -2399,6 +2484,9 @@ async function pipeUpstreamSse(
         usage = extractUsageMetrics(normalizedResponse) ?? usage;
         if (hasMeaningfulResponseOutput(normalizedResponse)) {
           wroteTextContent = true;
+        }
+        if (responseObjectHasToolCall(normalizedResponse)) {
+          wroteToolCall = true;
         }
         addUsageToStats(usage);
       }
@@ -2439,11 +2527,13 @@ async function pipeUpstreamSse(
     reader.releaseLock();
   }
 
-  // Anti-false-positive: if usage reports outputTokens > 0, the stream almost
-  // certainly produced real content even if our event-level text detection missed
-  // it (e.g. provider uses non-standard event names).  Do not treat it as empty.
-  const usageOutputTokens = usage && typeof usage.outputTokens === 'number' ? usage.outputTokens : 0;
-  const effectiveWroteText = wroteTextContent || usageOutputTokens > 0;
+  // A stream is only "useful" if it produced visible text or a tool call.
+  // Upstream-reported usage.outputTokens is NOT sufficient: some providers
+  // report token counts while emitting only reasoning/meta events and no
+  // client-visible answer, which previously slipped through as a 200 with an
+  // empty body and stalled the calling agent. Tool calls are tracked
+  // separately so legitimate function-call turns (no output_text) still pass.
+  const effectiveWroteText = wroteTextContent || wroteToolCall;
 
   // If we detected content late (in the finally block via hasMeaningfulResponseOutput)
   // but the pending client events were never flushed, flush them now before ending.
@@ -2460,8 +2550,8 @@ async function pipeUpstreamSse(
     totalBytes,
     usage,
     wroteTextContent,
+    wroteToolCall,
     effectiveWroteText,
-    usageOutputTokens,
     textCharCount,
   });
   return {

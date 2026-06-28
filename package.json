@@ -41,6 +41,8 @@
     "check:sse": "tsx checks/check-sse-reconstruction.ts",
     "check:stream-first-text-timeout": "tsx checks/check-stream-first-text-timeout.ts",
     "check:stream-fallback": "tsx checks/check-stream-fallback.ts",
+    "check:stream-usage-only-no-output-fallback": "tsx checks/check-stream-usage-only-no-output-fallback.ts",
+    "check:stream-tool-call-no-false-fallback": "tsx checks/check-stream-tool-call-no-false-fallback.ts",
     "check:stream-empty-fallback-exhausted": "tsx checks/check-stream-empty-fallback-exhausted.ts",
     "check:stream-terminated-fallback": "tsx checks/check-stream-terminated-fallback.ts",
     "check:fallback-exhausted": "tsx checks/check-fallback-exhausted.ts",
@@ -62,7 +64,8 @@
   "dependencies": {
     "@ai-sdk/open-responses": "^1.0.6",
     "ai": "^6.0.116",
-    "dotenv": "^16.6.1"
+    "dotenv": "^16.6.1",
+    "undici": "^7.15.0"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
