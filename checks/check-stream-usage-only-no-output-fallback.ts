@@ -105,13 +105,24 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
+      default_model: 'fallback-model',
+      channels: [
         {
-          name: 'fallback-a',
+          id: 'primary',
+          name: 'usage-only-primary',
+          base_url: `http://127.0.0.1:${primaryAddress.port}`,
+          api_key: 'primary-key',
+        },
+        {
+          id: 'fallback-a',
           base_url: `http://127.0.0.1:${fallbackAddress.port}`,
           api_key: 'fallback-key',
         },
       ],
+      models: {
+        'fallback-model': { channel_ids: ['primary', 'fallback-a'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -124,9 +135,11 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-stream-usage-only-check',
-      PRIMARY_PROVIDER_NAME: 'usage-only-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${primaryAddress.port}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -156,7 +169,7 @@ async function main() {
     assert.equal(response.status, 200);
     const text = await response.text();
     assert.match(text, /"delta":"real answer"/);
-    assert.equal(primaryRequests, 1, 'primary should receive exactly 1 request');
+    assert.equal(primaryRequests, 3, 'primary should receive three attempts before fallback');
     assert.equal(fallbackRequests, 1, 'fallback should be reached because primary produced no usable output');
 
     const output = stdout.join('');

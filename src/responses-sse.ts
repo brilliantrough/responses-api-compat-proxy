@@ -1,6 +1,38 @@
 import { isJsonRecord, type JsonRecord, type JsonValue } from './responses-input-normalization.js';
+import { observeResponseUsage } from './usage-tracking.js';
 
 export type SseEvent = { event: string; data: string };
+
+// Some relay gateways keep SSE connections alive by emitting synthetic
+// `response.output_text.delta` events whose item_id is a sentinel such as
+// "SSE-Keep-Alive" instead of a proper SSE comment line. Clients built on the
+// Vercel AI SDK treat those as real deltas and abort the whole turn with
+// "text part SSE-Keep-Alive not found", so they must never reach the client.
+const KEEP_ALIVE_ID_PATTERN = /keep[-_ ]?alive/i;
+
+export function isKeepAliveStreamPayload(payload: unknown): boolean {
+  if (!isJsonRecord(payload)) {
+    return false;
+  }
+
+  const item = isJsonRecord(payload.item) ? payload.item : undefined;
+  const itemId = typeof payload.item_id === 'string'
+    ? payload.item_id
+    : typeof item?.id === 'string'
+      ? item.id
+      : undefined;
+
+  return itemId !== undefined && KEEP_ALIVE_ID_PATTERN.test(itemId);
+}
+
+// SSE comment-only blocks (keep-alive heartbeats such as `: PING`) carry no
+// data. Re-emitting them as `event: message` + empty data only risks parser
+// quirks downstream, so callers drop them before forwarding.
+export function isCommentOnlySseChunk(chunk: string): boolean {
+  return chunk
+    .split(/\r?\n/)
+    .every(line => line.trim().length === 0 || line.startsWith(':'));
+}
 
 export function parseSse(text: string) {
   const events: SseEvent[] = [];
@@ -140,7 +172,7 @@ export function synthesizeResponseFromEvents(events: SseEvent[]) {
 export function normalizeResponseObject(responseObject: JsonRecord, requestBody: JsonRecord) {
   const normalized: JsonRecord = {
     ...responseObject,
-    object: 'response',
+    object: typeof responseObject.object === 'string' ? responseObject.object : 'response',
   };
 
   if (typeof requestBody.model === 'string') {
@@ -161,6 +193,7 @@ export function normalizeResponseObject(responseObject: JsonRecord, requestBody:
 }
 
 export function extractUsageMetrics(responseObject: JsonRecord) {
+  observeResponseUsage(responseObject);
   if (!isJsonRecord(responseObject.usage)) {
     return undefined;
   }
@@ -198,6 +231,7 @@ export function extractUsageMetrics(responseObject: JsonRecord) {
     usageMetrics.reasoningTokens = outputTokenDetails.reasoning_tokens;
   }
 
+  observeResponseUsage(responseObject, usageMetrics);
   return Object.keys(usageMetrics).length > 0 ? usageMetrics : undefined;
 }
 
@@ -205,6 +239,7 @@ export function extractUsageFromStreamPayload(payload: unknown, requestBody: Jso
   if (!isJsonRecord(payload)) {
     return undefined;
   }
+  observeResponseUsage(payload);
 
   if (isJsonRecord(payload.response)) {
     return extractUsageMetrics(normalizeResponseObject(payload.response, requestBody));
@@ -267,6 +302,9 @@ export function writeBufferedResponsesSse(
 
     if (streamMode === 'normalized') {
       const payload = parseStreamPayload(event.data);
+      if (isKeepAliveStreamPayload(payload)) {
+        continue;
+      }
       if (payload !== undefined) {
         usage = extractUsageFromStreamPayload(payload, requestBody) ?? usage;
         normalizedEvent = {

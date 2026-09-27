@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/responses-api-compat-proxy
 EnvironmentFile=/opt/responses-api-compat-proxy/instances/%i/.env
+Environment=FALLBACK_CONFIG_PATH=/opt/responses-api-compat-proxy/instances/%i/fallback.json
 ExecStart=/usr/bin/env npm run proxy:start
 Restart=on-failure
 RestartSec=5

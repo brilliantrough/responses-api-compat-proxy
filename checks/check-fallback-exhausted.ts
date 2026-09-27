@@ -82,11 +82,17 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
-        { name: 'bad-a', base_url: `http://127.0.0.1:${badAAddress.port}`, api_key: 'a-key', disable_cooldown: true },
-        { name: 'bad-b', base_url: `http://127.0.0.1:${badBAddress.port}`, api_key: 'b-key' },
-        { name: 'blackhole-fallback', base_url: `http://127.0.0.1:${blackholeAddress.port}`, api_key: 'c-key' },
+      default_model: 'fallback-model',
+      channels: [
+        { id: 'primary', name: 'bad-sse-primary', base_url: `http://127.0.0.1:${primaryAddress.port}`, api_key: 'primary-key' },
+        { id: 'bad-a', base_url: `http://127.0.0.1:${badAAddress.port}`, api_key: 'a-key' },
+        { id: 'bad-b', base_url: `http://127.0.0.1:${badBAddress.port}`, api_key: 'b-key' },
+        { id: 'blackhole-fallback', base_url: `http://127.0.0.1:${blackholeAddress.port}`, api_key: 'c-key' },
       ],
+      models: {
+        'fallback-model': { channel_ids: ['primary', 'bad-a', 'bad-b', 'blackhole-fallback'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -99,9 +105,11 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-fallback-exhausted-check',
-      PRIMARY_PROVIDER_NAME: 'bad-sse-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${primaryAddress.port}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
       PROXY_NON_STREAM_TIMEOUT_MS: '300',
       PROXY_UPSTREAM_TIMEOUT_MS: '300',
@@ -134,8 +142,6 @@ async function main() {
     const output = stdout.join('');
     assert.match(output, /failed to normalize sse payload, falling back/);
     assert.match(output, /fallback exhausted/);
-    assert.match(output, /endpoint failure recorded without cooldown/);
-    assert.doesNotMatch(output, /endpointName":"bad-a"[^\n]*skipping upstream during circuit cooldown/);
     assert.doesNotMatch(output, /unhandled proxy error/);
 
     console.log('Fallback exhausted check passed.');

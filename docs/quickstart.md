@@ -1,11 +1,6 @@
 # Quickstart
 
-This guide gets a local proxy instance running from a clean checkout with public-safe example files.
-
-## Requirements
-
-- `Node 22+` and `npm` are recommended for local runs.
-- If you want the fewest local prerequisites, use the Docker path in `README.md` or `docs/operations.md` instead.
+This guide starts a local proxy instance from a clean checkout using the new routing config format.
 
 ## 1. Install Dependencies
 
@@ -13,55 +8,49 @@ This guide gets a local proxy instance running from a clean checkout with public
 npm install
 ```
 
-## 2. Create a Local Runtime Instance
-
-Copy the tracked example directory and create local runtime files inside it:
+## 2. Create a Runtime Instance
 
 ```bash
 cp -r instances/example-11234 instances/proxy-11234
 cp instances/proxy-11234/.env.example instances/proxy-11234/.env
 cp instances/proxy-11234/fallback.json.example instances/proxy-11234/fallback.json
-cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.json
 ```
 
-`instances/proxy-11234/` is gitignored. Keep your real credentials there, not in tracked example files.
+`instances/proxy-11234/` is gitignored. Put real credentials there, not in tracked example files.
 
-The tracked `fallback.json.example` starts with an empty `fallback_api_config` so your first run does not accidentally call placeholder fallback domains.
+## 3. Configure Channels and Models
 
-## 3. Fill the Required Provider Fields
+Edit `instances/proxy-11234/fallback.json`:
 
-Edit `instances/proxy-11234/.env` and set:
-
-```env
-PRIMARY_PROVIDER_NAME=primary-provider
-PRIMARY_PROVIDER_BASE_URL=https://provider.example
-PRIMARY_PROVIDER_API_KEY=your_api_key_here
+```json
+{
+  "default_model": "my-model-v2",
+  "channels": [
+    {
+      "id": "primary",
+      "name": "Primary Provider",
+      "base_url": "https://provider.example",
+      "api_key": "your_api_key_here"
+    }
+  ],
+  "models": {
+    "my-model-v2": { "channel_ids": ["primary"] }
+  },
+  "aliases": {
+    "public-alias-model": "my-model-v2"
+  }
+}
 ```
 
-You will usually also want:
+Every `model` in client requests must be either a key in `models` or a key in `aliases`. Each channel base URL must serve `/v1/responses`; `/v1/models` is generated from this config.
 
-```env
-PRIMARY_PROVIDER_DEFAULT_MODEL=my-model-v2
-```
-
-The example file already includes:
-
-- `PROXY_ENV_PATH=./instances/proxy-11234/.env`
-- `FALLBACK_CONFIG_PATH=./instances/proxy-11234/fallback.json`
-- `MODEL_MAP_PATH=./instances/proxy-11234/model-map.json`
-
-That keeps the admin UI pointed at the same runtime files you started with.
-
-The shipped `.env.example` also keeps `HOST=0.0.0.0` so the same runtime files work in Docker. For a local-only first run outside Docker, set `HOST=127.0.0.1`.
+The example `.env` already points `FALLBACK_CONFIG_PATH` at this runtime `fallback.json`. It also keeps `HOST=0.0.0.0` for Docker; use `HOST=127.0.0.1` for local-only testing.
 
 ## 4. Build and Start
 
 ```bash
 npm run build
-env $(grep -v '^#' instances/proxy-11234/.env | xargs) npm run proxy:start
 ```
-
-This command loads the instance `.env` values into the current shell process and starts `dist/json-proxy.js`.
 
 ## 5. Check Health
 
@@ -79,7 +68,9 @@ Expected shape:
 }
 ```
 
-## 6. Send a Non-Streaming Request
+## 6. Send Requests
+
+Non-streaming:
 
 ```bash
 curl -s http://127.0.0.1:11234/v1/responses \
@@ -87,27 +78,27 @@ curl -s http://127.0.0.1:11234/v1/responses \
   -d '{"model":"my-model-v2","input":"Reply with exactly OK.","stream":false}'
 ```
 
-## 7. Send a Streaming Request
+Streaming:
 
 ```bash
 curl -N http://127.0.0.1:11234/v1/responses \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
-  -d '{"model":"my-model-v2","input":"Count to three.","stream":true}'
+  -d '{"model":"public-alias-model","input":"Count to three.","stream":true}'
 ```
 
-In `normalized` mode, you should see Responses-style SSE events such as `response.created`, `response.output_text.delta`, and `response.completed`.
+In `normalized` mode, the stream contains Responses-style SSE events such as `response.created`, `response.output_text.delta`, and `response.completed`.
 
-## 8. Open the Local Admin Pages
+## 7. Open Admin Pages
 
 - Config UI: `http://127.0.0.1:11234/admin`
-- Provider monitor: `http://127.0.0.1:11234/admin/monitor`
+- Channel monitor: `http://127.0.0.1:11234/admin/monitor`
 
-By default both are localhost-only and remote requests receive `403 Forbidden`. If you later enable `PROXY_ADMIN_ALLOW_HOST=1`, non-localhost requests are accepted too, so keep the published port on a trusted host.
+By default both are localhost-only. If you enable `PROXY_ADMIN_ALLOW_HOST=1`, keep the published port on a trusted host.
 
 ## Recommended Starting Values
 
-The example `.env` already uses conservative defaults that work well for many providers:
+The example `.env` uses conservative defaults:
 
 ```env
 PROXY_STREAM_MODE=normalized
@@ -118,22 +109,25 @@ PROXY_FIRST_TEXT_TIMEOUT_MS=120000
 PROXY_STREAM_IDLE_TIMEOUT_MS=70000
 PROXY_TOTAL_REQUEST_TIMEOUT_MS=700000
 PROXY_MAX_FALLBACK_TOTAL_MS=480000
+PROXY_CHANNEL_COOLDOWN_MS=300000
+PROXY_MODEL_CHANNEL_COOLDOWN_MS=120000
+PROXY_CHANNEL_FAILURE_THRESHOLD=1
+PROXY_MODEL_CHANNEL_FAILURE_THRESHOLD=1
+PROXY_HALF_OPEN_MAX_PROBES=1
 PROXY_MAX_CONCURRENT_REQUESTS=128
 PROXY_MAX_CACHED_RESPONSES=200
 ```
 
-Leave these alone for your first run unless you already know your upstream needs different limits.
-
 ## Common Mistakes
 
-- Forgetting to fill `PRIMARY_PROVIDER_API_KEY`.
-- Pointing `PRIMARY_PROVIDER_BASE_URL` at a site root that does not serve `/v1/responses` and `/v1/models`.
-- Starting the proxy without loading the instance `.env` values.
-- Editing tracked `*.example` files instead of the gitignored `instances/proxy-11234/` runtime files.
-- Expecting `PORT` or `HOST` changes in `/admin` to take effect without restarting the process.
+- Editing tracked `*.example` files instead of gitignored runtime files.
+- Sending a request for a model absent from `models` and `aliases`.
+- Forgetting that `api_key` is inline in `fallback.json`; keep that file mode `0600`.
+- Starting without loading the instance `.env` values.
+- Expecting `PORT`, `HOST`, or `PROXY_ENV_PATH` changes to apply without a process restart.
 
 ## Next Steps
 
-- See `docs/examples.md` for more request patterns.
-- See `docs/configuration.md` for full config reference and recommended profiles.
-- See `docs/operations.md` for multi-instance layout and systemd deployment.
+- See `docs/examples.md` for more routing examples.
+- See `docs/configuration.md` for the full config reference.
+- See `docs/operations.md` for migration, Docker, systemd, and multi-instance workflows.

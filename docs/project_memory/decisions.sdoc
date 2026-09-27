@@ -1,0 +1,137 @@
+[DOCUMENT]
+TITLE: 项目决策记录
+PREFIX: DEC-
+OPTIONS:
+  MARKUP: Markdown
+
+[GRAMMAR]
+ELEMENTS:
+- TAG: DECISION
+  PROPERTIES:
+    VIEW_STYLE: Narrative
+  FIELDS:
+  - TITLE: UID
+    TYPE: String
+    REQUIRED: True
+  - TITLE: STATUS
+    TYPE: SingleChoice(Proposed, Active, Deprecated, Superseded)
+    REQUIRED: True
+  - TITLE: TITLE
+    TYPE: String
+    REQUIRED: True
+  - TITLE: STATEMENT
+    TYPE: String
+    REQUIRED: True
+  - TITLE: RATIONALE
+    TYPE: String
+    REQUIRED: True
+  RELATIONS:
+  - TYPE: Parent
+    ROLE: Supersedes
+    REVERSE_ROLE: SupersededBy
+
+[DECISION]
+UID: DEC-USAGE-001
+STATUS: Active
+TITLE: 用量以真实上游尝试为基础，独立于健康计数
+STATEMENT: >>>
+| 项目 | 口径 |
+| --- | --- |
+| 计数单位 | 一次上游尝试一行；同一客户端请求的 fallback 共用 requestId |
+| 模型 | 转发使用的 canonical model；alias 不形成独立分组 |
+| 类型 | responses、compact、compact-v2 分开保存；compact 的 health scope 前缀不写入模型字段 |
+| 时间 | UTC 毫秒开始时间归档；界面按所选固定 UTC 偏移分小时或天，开始包含、结束不包含 |
+| 结果 | success、failed、cancelled、interrupted、pending；显式 response.failed/incomplete 不算成功 |
+| 成功率 | success / (success + failed)，取消、进程中断和进行中单列 |
+| 排除 | admin、healthz、models、响应缓存 GET、自动 compact 能力探测；未选中渠道的本地拒绝 |
+| Token | 原始报告的输入、输出、缓存输入、推理、总量；缺失保存 NULL，不估算为零 |
+| 去重 | 一次尝试中重复 SSE usage 更新同一条记录，不累加事件；最终 input + output 可补 total |
+| 缓存率 | 只对同时报告输入和缓存字段的记录计算 SUM(cached) / SUM(input)，禁止平均各请求百分比 |
+| 子集 | 缓存输入属于输入，推理属于输出，不重复加到总 token |
+| 覆盖率 | 同时报告输入和输出的已结束尝试 / 全部已结束尝试；缓存字段覆盖单列 |
+
+旧 `proxyStats` 和 health registry 都在内存里；reload 保留，进程重启清零，无法反推过去每天的使用量。
+<<<
+RATIONALE: >>>
+用户希望检查渠道和模型在不同时段的流量、token 和缓存异常；只记录最终成功渠道会掩盖 fallback 成本，按事件累加会重复计费，缺失字段当零会制造假的缓存故障。
+<<<
+
+[DECISION]
+UID: DEC-USAGE-002
+STATUS: Active
+TITLE: 每实例 SQLite 与独立用量看板
+STATEMENT: >>>
+- Node.js 22.13+ 内置 `node:sqlite`，独立 worker 执行写入和聚合；无额外数据库服务或前端 CDN。
+- 默认数据库为 `PROXY_ENV_PATH` 所在目录的 `usage.sqlite`；未设置该变量时使用 routing config 目录。实例独立，文件模式 0600，WAL + synchronous FULL，无自动历史清理。
+- 开始和结束写同一 attempt id。SIGINT/SIGTERM 停止接收并等待请求完成，再 drain worker 队列关库；强杀后已落盘的 pending 行下次启动转 interrupted，未报告的 token 保持未知。
+- 写库失败不影响代理转发，stderr 和看板显式报告统计不完整；worker 退出时查询返回 503。
+- `/admin/usage/stats` 使用现有 admin 访问控制；绑定参数查询；小时范围最多 31 天，天范围最多 366 天，渠道/模型各最多 100 个，最多 8 个待处理查询。
+- 单一 `/admin/usage` 页面：六项汇总、调用堆叠柱状图、token 构成/渠道/模型堆叠柱状图、缓存率对比折线、渠道×模型×类型可排序明细及 CSV。
+- 渠道/模型多选、日期、固定 UTC 偏移、粒度、请求类型和 15/30/60 秒自动刷新；选择保存在浏览器 localStorage，点击柱子聚焦时段明细。图例前 8 项加「其他」，全量保留在明细和导出中。
+- 新版后台用 `usageAvailable` 暴露入口能力；共享静态页在旧生产进程上隐藏 Usage 导航，升级重启后自动显示。
+- 备份运行中数据库应使用 SQLite backup API，不能只复制主文件而丢失 WAL。
+<<<
+RATIONALE: >>>
+十万级纯数字记录和索引适合 SQLite；worker 避免同步聚合占用转发事件循环。单一紧凑浅色看板减少切页，柱图比较规模、折线发现缓存异常，过滤与明细保留三个维度而不堆几十张卡片。
+<<<
+
+[DECISION]
+UID: DEC-CACHE-ROUTING-001
+STATUS: Active
+TITLE: 缓存成本导向的同渠道重试与窗口熔断
+STATEMENT: >>>
+| 项目 | 口径 |
+| --- | --- |
+| 尝试次数 | 每请求每渠道总共三次，首次 + 两次重试；不同请求即使 key 相同也各有预算；同渠道默认等待 500ms |
+| 优先级 | 新请求从最高排序可用渠道开始；请求内只向下 fallback；上位恢复后下一个新请求回切 |
+| Key 池 | 精确匹配 prompt_cache_key，默认 100 个活跃 key 的 LRU；按模型/协议记录成功渠道历史，不覆盖优先级，不做请求去重 |
+| 普通窗口 | 尝试结束时计一次，默认过去 180 秒失败至少 15 次且失败率严格大于 50%；2 失败后成功记 2F + 1S，成功不清窗口 |
+| 隔离 | 普通 Responses 各模型共享渠道窗口；compact v1/v2 按协议与 canonical model 隔离，包括认证、连接等普通失败 |
+| 熔断恢复 | 普通冷却默认 600 秒，到期重新统计，没有半开的一次失败重开规则；旧在途结果不能重新污染已恢复窗口 |
+| No breaker | disable_cooldown 只免普通自动熔断，仍记录表现，服从额度和人工阻断 |
+| 额度 | HTTP 或 JSON/SSE 内嵌额度证据立即全渠道冷却，跳过剩余尝试；默认两小时，迟到成功不能解除 |
+| 人工操作 | /admin/monitor 立即熔断默认十分钟；立即恢复清除全部阻断及决策窗口，保留累计统计和 Usage；操作前的结果不能覆盖操作后状态 |
+| 操作接口 | POST /admin/channels/breaker，channelId、fingerprint、action=open 或 close；旧 fingerprint 返回 409 |
+| 不重放 | 已向客户端发送 SSE 后不透明重试；有效输出缺失 usage 不重试，未知 token 字段保留 NULL |
+| 热更新 | PROXY_HEALTH_*、PROXY_CHANNEL_MAX_ATTEMPTS、PROXY_CHANNEL_RETRY_DELAY_MS、PROXY_CACHE_KEY_POOL_SIZE 支持校验与 reload；原两套阈值、冷却及半开环境键停用并警告 |
+| 配置原子性 | config.routingConfig 为唯一已解析快照；只由实例 .env 指定路由文件也初始化全部渠道；reload 同步 settings 与 topology，旧 lease 不修改新状态 |
+<<<
+RATIONALE: >>>
+用户确认优先考虑缓存和渠道价格：轻微抖动应在当前便宜渠道消化，持续故障才熔断。历史成功渠道不能压过价格优先级，额度耗尽不能浪费重试；充值后管理员需要立即恢复参与。按真实尝试统计与 Usage 对齐，隔离 compact 能力差异，避免重复输出及无 usage 假失败额外增加成本。
+<<<
+
+[DECISION]
+UID: DEC-UPTIME-001
+STATUS: Active
+TITLE: 模型路由 Uptime 采样及缓存图展示
+STATEMENT: >>>
+| 项目 | 口径 |
+| --- | --- |
+| 入口 | /admin/usage 的渠道 Uptime；GET /admin/uptime?model=<canonical>&hours=6/24/72/168，默认模型、24 小时 |
+| 采样 | 服务端启动后采一次，之后每 UTC 三分钟边界采一次；每实例 usage.sqlite 的独立 uptime 表持久保存 30 天，关闭浏览器不影响采样 |
+| 对象 | 仅当前 canonical model 路由中启用的 channel_ids，按优先级排列；不包含 alias 与 compact；渠道 fingerprint 改变后不拼接旧凭据历史 |
+| 红色 | 采样时实际被普通共享渠道熔断、额度或人工操作阻断；普通路由决策仍遵循 DEC-CACHE-ROUTING-001 |
+| 黄色 | 所选模型自身窗口仅一个条件成立：失败次数 >= 配置阈值（默认15），或失败率 > 配置比例（默认50%）；模型窗口独立记录，展示不改变选路 |
+| 绿色 | 可用且非黄色，包括无请求；No breaker 两项都成立但没有实际阻断时仍绿色，并注明豁免 |
+| 灰色 | 未采样，包括启动前、停机、配置变更；不回填健康值。可用采样率为非红色/有记录的样本，非主动探测 SLA |
+| 灯带 | 细矩形三分钟一格、长历史横向滚动、渠道名和可用采样率固定在左侧，悬浮显示时间、原因、模型成功失败数和阈值 |
+| 图表 | SVG 堆叠柱悬浮高亮轻微放大，缓存输入用浅薄荷渐变；曲线以不超出相邻数值范围的 cubic Bézier 平滑显示 |
+| 缺失缓存 | 仅曲线显示补零，tooltip 标注补零；原始 NULL、加权缓存率和覆盖率口径不变 |
+| 就近筛选 | 缓存曲线旁复用顶部渠道/模型多选，双向同步并刷新全部 Usage 图表；Uptime 独立模型筛选，不受历史 Usage 过滤影响 |
+<<<
+RATIONALE: >>>
+用户需要长时间观察实际熔断和预警、区分模型表现，并减少在筛选与缓存曲线之间上下滚动。复用 SQLite worker 与原生 SVG/CSS，保持紧凑浅色界面；实际共享熔断与模型独立观测分开解释，避免为展示而改变已确认路由策略。
+<<<
+
+[DECISION]
+UID: DEC-QUOTA-RESET-001
+STATUS: Active
+TITLE: 额度熔断在北京时间每日 00:02 自动到期
+STATEMENT: >>>
+- 补充 DEC-CACHE-ROUTING-001：额度冷却截止为「失败发生时刻 + quotaCooldownMs」与「严格晚于失败时刻的下一个北京时间 00:02」的较早值。
+- 固定 UTC+8（UTC 16:02），不依赖服务器时区；00:00 至 00:02 期间的新额度失败仍在当天 00:02 到期，00:02 起的新失败正常重新冷却。
+- 所有渠道共用此规则，包括 No breaker、普通 Responses 与 compact；普通和人工熔断、累计统计保持原语义。到期由既有时间戳选路与快照逻辑生效，无额外定时任务。
+<<<
+RATIONALE: >>>
+渠道每日零点刷新额度，保留两分钟刷新缓冲，避免前一日额度冷却继续阻止新一日调用；原有更早到期的冷却不延长。
+<<<

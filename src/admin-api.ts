@@ -11,6 +11,10 @@ import {
   type ConfigFileStore,
 } from './config-files.js';
 import type { RuntimeConfigStore } from './runtime-config.js';
+import type { CompactDetectionService } from './compact-support.js';
+import type { HealthRegistry } from './channel-health.js';
+import { parseUsageQuery, type createUsageStore } from './usage-store.js';
+import { collectUptime, UPTIME_INTERVAL_MS, type UptimeSample } from './uptime.js';
 
 export function isLocalhost(remoteAddress: string | undefined): boolean {
   if (!remoteAddress) return false;
@@ -56,10 +60,13 @@ export type AdminHandlerOptions = {
   getAdminStats?: () => unknown;
   clearResponseCache?: () => number;
   responseCacheSize?: () => number;
+  compactDetection?: CompactDetectionService;
+  usageStore?: ReturnType<typeof createUsageStore>;
+  healthRegistry?: HealthRegistry;
 };
 
 function rollbackBakFiles(store: ConfigFileStore): string[] {
-  const files = [store.envPath, store.fallbackPath, store.modelMapPath];
+  const files = [store.envPath, store.fallbackPath];
   const restored: string[] = [];
   for (const filePath of files) {
     const bakPath = filePath + '.bak';
@@ -96,8 +103,33 @@ function currentConfigStore(baseStore: ConfigFileStore, runtimeStore: RuntimeCon
   const snapshot = runtimeStore.getSnapshot();
   return createConfigFileStoreFromPaths({
     envPath: baseStore.envPath,
-    fallbackPath: snapshot.config.fallbackConfigPath,
-    modelMapPath: snapshot.config.modelMappingPath,
+    fallbackPath: snapshot.config.routingConfigPath,
+  });
+}
+
+function startCompactDetection(
+  options: AdminHandlerOptions,
+  runtimeStore: RuntimeConfigStore,
+  force: boolean,
+): void {
+  const detection = options.compactDetection;
+  if (!detection) {
+    return;
+  }
+
+  const config = runtimeStore.getSnapshot().config;
+  const compactRoute = config.routingConfig.compactRoute;
+  detection.setModel(compactRoute?.canonicalModel ?? null);
+  if (compactRoute === undefined || !config.compactDetectEnabled) {
+    return;
+  }
+
+  void detection.detectAll(
+    Array.from(config.routingConfig.channelsById.values()),
+    compactRoute.canonicalModel,
+    { force, timeoutMs: config.compactDetectTimeoutMs },
+  ).catch(error => {
+    console.warn(`compact detection failed: ${error instanceof Error ? error.message : String(error)}`);
   });
 }
 
@@ -120,6 +152,33 @@ export function createAdminHandler(options: AdminHandlerOptions) {
     }
 
     const store = currentConfigStore(configStore, runtimeStore);
+
+    if (method === 'POST' && url === '/admin/channels/breaker') {
+      let body: unknown;
+      try { body = await readJsonBody(req); } catch {
+        sendJson(res, 400, { ok: false, error: { message: 'Invalid JSON body' } });
+        return true;
+      }
+      if (!body || typeof body !== 'object' || !('channelId' in body) || typeof body.channelId !== 'string' ||
+          !('action' in body) || (body.action !== 'open' && body.action !== 'close') ||
+          !('fingerprint' in body) || typeof body.fingerprint !== 'string') {
+        sendJson(res, 400, { ok: false, error: { message: 'Expected channelId, fingerprint and action (open|close)' } });
+        return true;
+      }
+      if (!options.healthRegistry) {
+        sendJson(res, 501, { ok: false, error: { message: 'Breaker control unavailable' } });
+        return true;
+      }
+      const channel = runtimeStore.getSnapshot().config.routingConfig.channelsById.get(body.channelId);
+      if (!channel || channel.fingerprint !== body.fingerprint) {
+        sendJson(res, 409, { ok: false, error: { message: 'Channel changed; refresh before controlling its breaker' } });
+        return true;
+      }
+      options.healthRegistry.control(body.channelId, body.action);
+      console.log(`admin breaker ${body.action}: ${JSON.stringify(body.channelId)}`);
+      sendJson(res, 200, { ok: true, healthSnapshot: options.healthRegistry.snapshot() });
+      return true;
+    }
 
     if (method === 'GET' && url === '/admin/config') {
       try {
@@ -186,6 +245,7 @@ export function createAdminHandler(options: AdminHandlerOptions) {
           });
           return true;
         }
+        startCompactDetection(options, runtimeStore, false);
         const snapshot = runtimeStore.getSnapshot();
         sendJson(res, 200, {
           ok: true,
@@ -211,6 +271,7 @@ export function createAdminHandler(options: AdminHandlerOptions) {
           });
           return true;
         }
+        startCompactDetection(options, runtimeStore, false);
         const snapshot = runtimeStore.getSnapshot();
         sendJson(res, 200, {
           ok: true,
@@ -242,6 +303,7 @@ export function createAdminHandler(options: AdminHandlerOptions) {
           });
           return true;
         }
+        startCompactDetection(options, runtimeStore, false);
         const snapshot = runtimeStore.getSnapshot();
         sendJson(res, 200, {
           ok: true,
@@ -267,6 +329,22 @@ export function createAdminHandler(options: AdminHandlerOptions) {
       return true;
     }
 
+    if (method === 'GET' && url === '/admin/compact/detection') {
+      sendJson(res, 200, {
+        ok: true,
+        ...(options.compactDetection
+          ? options.compactDetection.getResults()
+          : { model: null, inProgress: false, lastCompletedAt: null, results: [] }),
+      });
+      return true;
+    }
+
+    if (method === 'POST' && url === '/admin/compact/detect') {
+      startCompactDetection(options, runtimeStore, true);
+      sendJson(res, 200, { ok: true, started: true });
+      return true;
+    }
+
     if (method === 'POST' && url === '/admin/cache/clear') {
       if (options.clearResponseCache) {
         const clearedResponses = options.clearResponseCache();
@@ -278,6 +356,55 @@ export function createAdminHandler(options: AdminHandlerOptions) {
       } else {
         sendJson(res, 200, { ok: true });
       }
+      return true;
+    }
+
+    if (method === 'GET' && url === '/admin/uptime') {
+      if (!options.usageStore || !options.healthRegistry) {
+        sendJson(res, 501, { ok: false, error: { message: 'Uptime history unavailable' } });
+        return true;
+      }
+      const routing = runtimeStore.getSnapshot().config.routingConfig;
+      const params = new URL(rawUrl, 'http://localhost').searchParams;
+      const model = params.get('model') ?? routing.defaultModel;
+      const hours = Number(params.get('hours') ?? 24);
+      const route = routing.modelRoutes.get(model);
+      if (!route || ![6, 24, 72, 168].includes(hours)) {
+        sendJson(res, 400, { ok: false, error: { message: 'Choose a configured canonical model and 6, 24, 72 or 168 hours' } });
+        return true;
+      }
+      const to = Math.floor(Date.now() / UPTIME_INTERVAL_MS) * UPTIME_INTERVAL_MS + UPTIME_INTERVAL_MS;
+      const from = to - hours * 3600000;
+      try {
+        const result = await options.usageStore.queryUptime({ from, to, model }) as { rows: UptimeSample[]; writeError: string | null };
+        const active = (row: UptimeSample) => route.channelIds.includes(row.channelId) && routing.channelsById.get(row.channelId)?.fingerprint === row.fingerprint;
+        sendJson(res, 200, { ok: true, from, to, intervalMs: UPTIME_INTERVAL_MS, model, hours,
+          models: [...routing.modelRoutes.keys()], channels: route.channelIds.map(id => ({ id, name: routing.channelsById.get(id)!.name })),
+          rows: result.rows.filter(active).map(({ fingerprint: _, ...row }) => row),
+          current: collectUptime(runtimeStore, options.healthRegistry).filter(row => row.model === model && active(row)).map(({ fingerprint: _, ...row }) => row),
+          writeError: result.writeError, generatedAt: Date.now() });
+      } catch (error) { sendJson(res, 503, { ok: false, error: { message: error instanceof Error ? error.message : String(error) } }); }
+      return true;
+    }
+
+    if (method === 'GET' && url === '/admin/usage/stats') {
+      let query;
+      try { query = parseUsageQuery(new URL(rawUrl, 'http://localhost').searchParams); }
+      catch (error) { sendJson(res, 400, { ok: false, error: { message: String(error) } }); return true; }
+      try {
+        if (!options.usageStore) throw new Error('Usage storage is unavailable; restart this instance to enable it');
+        const data = await options.usageStore.query(query) as Record<string, unknown>;
+        const config = runtimeStore.getSnapshot().config;
+        sendJson(res, 200, { ...data, instanceName: config.instanceName,
+          configuredChannels: Array.from(config.routingConfig.channelsById.values()).map(channel => ({ id: channel.id, name: channel.name })),
+          configuredModels: Array.from(config.routingConfig.modelRoutes.keys()),
+        });
+      } catch (error) { sendJson(res, 503, { ok: false, error: { message: String(error) } }); }
+      return true;
+    }
+
+    if (method === 'GET' && url === '/admin/usage') {
+      serveAdminStatic(res, 'usage.html', 'text/html; charset=utf-8');
       return true;
     }
 
@@ -307,6 +434,10 @@ export function createAdminHandler(options: AdminHandlerOptions) {
       }
       if (assetName === 'admin.js') {
         serveAdminStatic(res, 'admin.js', 'application/javascript; charset=utf-8', 'assets');
+        return true;
+      }
+      if (assetName === 'usage.js' || assetName === 'usage.css') {
+        serveAdminStatic(res, assetName, assetName.endsWith('.js') ? 'application/javascript; charset=utf-8' : 'text/css; charset=utf-8', 'assets');
         return true;
       }
       if (assetName === 'admin.css') {

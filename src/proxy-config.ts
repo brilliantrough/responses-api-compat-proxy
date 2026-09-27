@@ -1,32 +1,33 @@
-import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ClaudeBillingHeaderMode } from './responses-input-normalization.js';
+import { loadRoutingConfig, type RoutingConfig } from './routing-config.js';
 
 export type StreamMode = 'normalized' | 'raw';
-
-export type UpstreamEndpoint = {
-  name: string;
-  url: string;
-  apiKey: string;
-  isFallback: boolean;
-  disableCooldown?: boolean;
-};
 
 export type ProxyRuntimeConfig = {
   host: string;
   port: number;
   adminAllowHost: boolean;
   instanceName: string;
-  primaryProviderName: string;
-  primaryProviderBaseUrl: string;
-  apiKey: string;
-  upstreamUrl: string;
-  upstreamModelsUrl: string;
-  fallbackConfigPath: string;
-  modelMappingPath: string;
-  defaultModel: string;
-  modelMappings: Record<string, string>;
+  routingConfigPath: string;
+  routingConfig: RoutingConfig;
+  healthWindowMs: number;
+  healthFailureThreshold: number;
+  healthFailureRateThreshold: number;
+  healthCooldownMs: number;
+  channelMaxAttempts: number;
+  channelRetryDelayMs: number;
+  cacheKeyPoolSize: number;
+  channelCooldownMs: number;
+  modelChannelCooldownMs: number;
+  quotaCooldownMs: number;
+  channelFailureThreshold: number;
+  modelChannelFailureThreshold: number;
+  halfOpenMaxProbes: number;
   upstreamTimeoutMs: number;
+  compactTimeoutMs: number;
+  compactDetectTimeoutMs: number;
+  compactDetectEnabled: boolean;
   nonStreamingRequestTimeoutMs: number;
   firstByteTimeoutMs: number;
   firstTextTimeoutMs: number;
@@ -54,37 +55,8 @@ export type ProxyRuntimeConfig = {
   fallbackOnCompat4xx: boolean;
   compatFallbackPatterns: string[];
   clientErrorPatterns: string[];
-  endpointTimeoutCooldownMs: number;
-  endpointInvalidResponseCooldownMs: number;
-  endpointAuthCooldownMs: number;
-  endpointFailureThreshold: number;
-  endpointHalfOpenMaxProbes: number;
-  maxFallbackAttempts: number;
   maxFallbackTotalMs: number;
-  primaryEndpoint: UpstreamEndpoint;
-  fallbackEndpoints: UpstreamEndpoint[];
-  responsesEndpoints: UpstreamEndpoint[];
 };
-
-type FallbackConfigFile = {
-  fallback_api_config?: unknown;
-};
-
-type ModelMappingsFile = {
-  model_mappings?: unknown;
-};
-
-type FallbackApiConfig = {
-  name: string;
-  base_url: string;
-  api_key?: string;
-  api_key_env?: string;
-  disable_cooldown?: boolean;
-};
-
-export function normalizeBaseUrl(baseUrl: string) {
-  return baseUrl.replace(/\/+$/, '');
-}
 
 export function isEnabled(value: string | undefined, defaultValue = false) {
   if (value === undefined) {
@@ -92,6 +64,37 @@ export function isEnabled(value: string | undefined, defaultValue = false) {
   }
 
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+}
+
+export const routingPolicyDefaults = {
+  PROXY_HEALTH_WINDOW_MS: '180000',
+  PROXY_HEALTH_FAILURE_THRESHOLD: '15',
+  PROXY_HEALTH_FAILURE_RATE_THRESHOLD: '0.5',
+  PROXY_HEALTH_COOLDOWN_MS: '600000',
+  PROXY_CHANNEL_MAX_ATTEMPTS: '3',
+  PROXY_CHANNEL_RETRY_DELAY_MS: '500',
+  PROXY_CACHE_KEY_POOL_SIZE: '100',
+  PROXY_QUOTA_COOLDOWN_MS: '7200000',
+};
+
+export function readRoutingPolicyConfig(env: NodeJS.ProcessEnv) {
+  const number = (key: keyof typeof routingPolicyDefaults, min = 1, fraction = false) => {
+    const value = Number(env[key] ?? routingPolicyDefaults[key]);
+    if (!Number.isFinite(value) || value < min || (fraction ? value >= 1 : !Number.isSafeInteger(value))) {
+      throw new Error(`${key} must be ${fraction ? 'a number >= 0 and < 1' : `an integer >= ${min}`}`);
+    }
+    return value;
+  };
+  return {
+    healthWindowMs: number('PROXY_HEALTH_WINDOW_MS'),
+    healthFailureThreshold: number('PROXY_HEALTH_FAILURE_THRESHOLD'),
+    healthFailureRateThreshold: number('PROXY_HEALTH_FAILURE_RATE_THRESHOLD', 0, true),
+    healthCooldownMs: number('PROXY_HEALTH_COOLDOWN_MS'),
+    channelMaxAttempts: number('PROXY_CHANNEL_MAX_ATTEMPTS'),
+    channelRetryDelayMs: number('PROXY_CHANNEL_RETRY_DELAY_MS', 0),
+    cacheKeyPoolSize: number('PROXY_CACHE_KEY_POOL_SIZE'),
+    quotaCooldownMs: number('PROXY_QUOTA_COOLDOWN_MS'),
+  };
 }
 
 export function parseEnvList(value: string | undefined, fallback: string[]) {
@@ -203,115 +206,6 @@ export const defaultClientErrorPatterns = [
   'unsupported response_format type',
 ];
 
-function isFallbackApiConfig(value: unknown): value is FallbackApiConfig {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'name' in value &&
-    'base_url' in value &&
-    typeof value.name === 'string' &&
-    typeof value.base_url === 'string' &&
-    ((('api_key' in value) && typeof value.api_key === 'string') ||
-      (('api_key_env' in value) && typeof value.api_key_env === 'string'))
-  );
-}
-
-function resolveFallbackApiKey(item: FallbackApiConfig, env: NodeJS.ProcessEnv) {
-  if (typeof item.api_key === 'string' && item.api_key.length > 0) {
-    return item.api_key;
-  }
-
-  if (typeof item.api_key_env === 'string' && item.api_key_env.length > 0) {
-    return env[item.api_key_env];
-  }
-
-  return undefined;
-}
-
-function loadFallbackEndpoints(fallbackConfigPath: string, env: NodeJS.ProcessEnv) {
-  try {
-    const raw = readFileSync(fallbackConfigPath, 'utf8');
-    const parsed = JSON.parse(raw) as FallbackConfigFile;
-
-    if (!Array.isArray(parsed.fallback_api_config)) {
-      return [] as UpstreamEndpoint[];
-    }
-
-    return parsed.fallback_api_config
-      .filter(isFallbackApiConfig)
-      .flatMap(item => {
-        const resolvedApiKey = resolveFallbackApiKey(item, env);
-
-        if (!resolvedApiKey) {
-          console.warn(
-            `Skipping fallback '${item.name}' from ${fallbackConfigPath}: missing api_key or unresolved api_key_env`,
-          );
-          return [] as UpstreamEndpoint[];
-        }
-
-        return [
-          {
-            name: item.name,
-            url: `${normalizeBaseUrl(item.base_url)}/v1/responses`,
-            apiKey: resolvedApiKey,
-            isFallback: true,
-            disableCooldown: item.disable_cooldown === true,
-          },
-        ];
-      });
-  } catch (error) {
-    console.warn(
-      `Failed to load fallback API config from ${fallbackConfigPath}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return [] as UpstreamEndpoint[];
-  }
-}
-
-function normalizeModelMappings(value: unknown) {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return {} as Record<string, string>;
-  }
-
-  const mappings: Record<string, string> = {};
-  for (const [alias, target] of Object.entries(value)) {
-    if (typeof target !== 'string') {
-      continue;
-    }
-
-    const normalizedAlias = alias.trim();
-    const normalizedTarget = target.trim();
-    if (normalizedAlias.length === 0 || normalizedTarget.length === 0) {
-      continue;
-    }
-
-    mappings[normalizedAlias] = normalizedTarget;
-  }
-
-  return mappings;
-}
-
-function loadModelMappings(modelMappingPath: string) {
-  try {
-    const raw = readFileSync(modelMappingPath, 'utf8');
-    const parsed = JSON.parse(raw) as ModelMappingsFile | Record<string, unknown>;
-    const mappingSource =
-      typeof parsed === 'object' && parsed !== null && 'model_mappings' in parsed
-        ? parsed.model_mappings
-        : parsed;
-
-    return normalizeModelMappings(mappingSource);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
-      return {} as Record<string, string>;
-    }
-
-    console.warn(
-      `Failed to load model mapping config from ${modelMappingPath}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return {} as Record<string, string>;
-  }
-}
-
 export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): ProxyRuntimeConfig {
   const host = env.HOST ?? '0.0.0.0';
   const port = Number(env.PORT ?? 11234);
@@ -322,20 +216,31 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
     );
   }
   const instanceName = env.INSTANCE_NAME ?? `responses-proxy-${port}`;
-  const primaryProviderName = env.PRIMARY_PROVIDER_NAME ?? 'primary-provider';
-  const primaryProviderBaseUrl = normalizeBaseUrl(env.PRIMARY_PROVIDER_BASE_URL ?? 'https://primary.example');
-  const apiKey = env.PRIMARY_PROVIDER_API_KEY;
+  const routingConfigPath = resolve(env.FALLBACK_CONFIG_PATH ?? 'fallback.json');
+  const routingConfig = loadRoutingConfig(routingConfigPath);
 
-  if (!apiKey) {
-    throw new Error('Missing PRIMARY_PROVIDER_API_KEY in .env');
+  if (
+    env.PRIMARY_PROVIDER_NAME !== undefined ||
+    env.PRIMARY_PROVIDER_BASE_URL !== undefined ||
+    env.PRIMARY_PROVIDER_API_KEY !== undefined ||
+    env.PRIMARY_PROVIDER_DEFAULT_MODEL !== undefined
+  ) {
+    console.warn('PRIMARY_PROVIDER_* environment variables are ignored; configure channels and models in the routing config');
   }
 
-  const upstreamUrl = `${primaryProviderBaseUrl}/v1/responses`;
-  const upstreamModelsUrl = `${primaryProviderBaseUrl}/v1/models`;
-  const fallbackConfigPath = resolve(env.FALLBACK_CONFIG_PATH ?? 'config.json');
-  const modelMappingPath = resolve(env.MODEL_MAP_PATH ?? 'model-map.json');
-  const defaultModel = env.PRIMARY_PROVIDER_DEFAULT_MODEL ?? 'my-model-v2';
+  const policy = readRoutingPolicyConfig(env);
+  const legacyHealthKeys = ['PROXY_CHANNEL_COOLDOWN_MS', 'PROXY_MODEL_CHANNEL_COOLDOWN_MS', 'PROXY_CHANNEL_FAILURE_THRESHOLD', 'PROXY_MODEL_CHANNEL_FAILURE_THRESHOLD', 'PROXY_HALF_OPEN_MAX_PROBES'].filter(key => env[key] !== undefined);
+  if (legacyHealthKeys.length) console.warn(`Legacy health settings ignored: ${legacyHealthKeys.join(', ')}; use PROXY_HEALTH_* rolling-window settings`);
+  // Legacy response fields remain readable by older admin assets; old env knobs no longer govern routing.
+  const channelCooldownMs = policy.healthCooldownMs;
+  const modelChannelCooldownMs = policy.healthCooldownMs;
+  const channelFailureThreshold = policy.healthFailureThreshold;
+  const modelChannelFailureThreshold = policy.healthFailureThreshold;
+  const halfOpenMaxProbes = 0;
   const upstreamTimeoutMs = Number(env.PROXY_UPSTREAM_TIMEOUT_MS ?? 8000);
+  const compactTimeoutMs = Number(env.PROXY_COMPACT_TIMEOUT_MS ?? 300000);
+  const compactDetectTimeoutMs = Number(env.PROXY_COMPACT_DETECT_TIMEOUT_MS ?? 45000);
+  const compactDetectEnabled = isEnabled(env.PROXY_COMPACT_DETECT_ENABLED, true);
   const nonStreamingRequestTimeoutMs = Number(env.PROXY_NON_STREAM_TIMEOUT_MS ?? 20000);
   const firstByteTimeoutMs = Number(env.PROXY_FIRST_BYTE_TIMEOUT_MS ?? 8000);
   const firstTextTimeoutMs = Number(env.PROXY_FIRST_TEXT_TIMEOUT_MS ?? 0);
@@ -366,23 +271,6 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
     env.PROXY_NO_FALLBACK_CLIENT_ERROR_PATTERNS ?? env.PROXY_FALLBACK_CLIENT_ERROR_PATTERNS,
     defaultClientErrorPatterns,
   );
-  const endpointTimeoutCooldownMs = Number(env.PROXY_ENDPOINT_TIMEOUT_COOLDOWN_MS ?? 120000);
-  const endpointInvalidResponseCooldownMs = Number(env.PROXY_ENDPOINT_INVALID_RESPONSE_COOLDOWN_MS ?? 120000);
-  const endpointAuthCooldownMs = Number(env.PROXY_ENDPOINT_AUTH_COOLDOWN_MS ?? 1800000);
-  const endpointFailureThreshold = Number(env.PROXY_ENDPOINT_FAILURE_THRESHOLD ?? 1);
-  const endpointHalfOpenMaxProbes = Number(env.PROXY_ENDPOINT_HALF_OPEN_MAX_PROBES ?? 1);
-
-  const primaryEndpoint: UpstreamEndpoint = {
-    name: primaryProviderName,
-    url: upstreamUrl,
-    apiKey,
-    isFallback: false,
-  };
-
-  const fallbackEndpoints = loadFallbackEndpoints(fallbackConfigPath, env);
-  const modelMappings = loadModelMappings(modelMappingPath);
-  const responsesEndpoints = [primaryEndpoint, ...fallbackEndpoints];
-  const maxFallbackAttempts = Number(env.PROXY_MAX_FALLBACK_ATTEMPTS ?? Math.max(1, fallbackEndpoints.length));
   const maxFallbackTotalMs = Number(env.PROXY_MAX_FALLBACK_TOTAL_MS ?? 30000);
 
   return {
@@ -390,16 +278,18 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
     port,
     adminAllowHost,
     instanceName,
-    primaryProviderName,
-    primaryProviderBaseUrl,
-    apiKey,
-    upstreamUrl,
-    upstreamModelsUrl,
-    fallbackConfigPath,
-    modelMappingPath,
-    defaultModel,
-    modelMappings,
+    routingConfigPath,
+    routingConfig,
+    ...policy,
+    channelCooldownMs,
+    modelChannelCooldownMs,
+    channelFailureThreshold,
+    modelChannelFailureThreshold,
+    halfOpenMaxProbes,
     upstreamTimeoutMs,
+    compactTimeoutMs,
+    compactDetectTimeoutMs,
+    compactDetectEnabled,
     nonStreamingRequestTimeoutMs,
     firstByteTimeoutMs,
     firstTextTimeoutMs,
@@ -427,15 +317,6 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
     fallbackOnCompat4xx,
     compatFallbackPatterns,
     clientErrorPatterns,
-    endpointTimeoutCooldownMs,
-    endpointInvalidResponseCooldownMs,
-    endpointAuthCooldownMs,
-    endpointFailureThreshold,
-    endpointHalfOpenMaxProbes,
-    maxFallbackAttempts,
     maxFallbackTotalMs,
-    primaryEndpoint,
-    fallbackEndpoints,
-    responsesEndpoints,
   };
 }

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#ffffff"><title>Usage Analytics · Relay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M8 12v13m8-19v19m8-16v11' stroke='%233b63dc' stroke-width='4'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/admin/assets/usage.css">
+</head>
+<body>
+<a class="skip-link" href="#main-content">跳转到看板</a>
+<div class="app-shell">
+  <aside class="app-sidebar">
+    <a class="brand" href="/admin" aria-label="Relay home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>relay<span class="brand-caption">RESPONSES GATEWAY</span></span></a>
+    <div class="workspace-label"><span class="workspace-avatar">R</span><div>Proxy workspace<small>OpenAI-compatible API</small></div></div>
+    <nav class="app-nav" aria-label="Main navigation">
+      <div class="nav-label">WORKSPACE</div>
+      <a class="nav-link" href="/admin/monitor"><span class="nav-icon" aria-hidden="true">◷</span>Overview<span class="nav-live">LIVE</span></a>
+      <a class="nav-link active" href="/admin/usage" aria-current="page"><span class="nav-icon" aria-hidden="true">▥</span>Usage<span class="nav-live">HISTORY</span></a>
+      <div class="nav-label">CONFIGURATION</div>
+      <a class="nav-link" href="/admin#channels"><span class="nav-icon" aria-hidden="true">⊞</span>Channels</a>
+      <a class="nav-link" href="/admin#models"><span class="nav-icon" aria-hidden="true">⑂</span>Model routing</a>
+      <a class="nav-link" href="/admin#compact"><span class="nav-icon" aria-hidden="true">⇥</span>Compaction</a>
+      <a class="nav-link" href="/admin#aliases"><span class="nav-icon" aria-hidden="true">↗</span>Aliases</a>
+      <div class="nav-label">SYSTEM</div>
+      <a class="nav-link" href="/admin#environment"><span class="nav-icon" aria-hidden="true">⚙︎</span>Environment</a>
+      <a class="nav-link" href="/admin#runtime"><span class="nav-icon" aria-hidden="true">≡</span>Runtime</a>
+    </nav>
+    <div class="sidebar-footer"><span class="sidebar-dot"></span><div>Responses API proxy<small>Configuration & observability</small></div><span class="footer-version">v1</span></div>
+  </aside>
+  <div class="app-main">
+    <header class="topbar"><div class="breadcrumb">Workspace <span>/</span><strong>Usage analytics</strong></div><span id="usage-instance" class="badge">Instance —</span></header>
+    <main id="main-content" class="content-grid usage-shell" tabindex="-1">
+      <div class="page-heading"><div><h1>用量看板 <span class="heading-tag">Analytics</span></h1><p>谁在承接请求，token 花在哪里，缓存是否稳定。</p></div><div class="btn-row"><button id="export-csv" disabled>↓ 导出明细</button><button id="refresh" class="primary">↻ 刷新</button></div></div>
+      <section class="usage-filters" aria-label="统计筛选">
+        <div class="filter-row">
+          <label>时间范围<select id="period"><option value="today">今天</option><option value="yesterday">昨天</option><option value="7d" selected>近 7 天</option><option value="30d">近 30 天</option><option value="custom">自定义日期</option></select></label>
+          <label>开始日期<input id="date-from" type="date"></label><label>结束日期<input id="date-to" type="date"></label>
+          <label>时间粒度<select id="bucket"><option value="day">按天</option><option value="hour">按小时</option></select></label>
+          <label>时区<select id="timezone"><option value="480">UTC+08:00</option><option value="0">UTC</option></select></label>
+          <label>请求类型<select id="kind"><option value="all">全部类型</option><option value="responses">Responses</option><option value="compact">Compact v1</option><option value="compact-v2">Compact v2</option></select></label>
+          <label>自动刷新<select id="auto-refresh"><option value="0">关闭</option><option value="15000">15 秒</option><option value="30000" selected>30 秒</option><option value="60000">60 秒</option></select></label>
+        </div>
+        <div class="filter-row secondary-filters">
+          <details class="multi-filter" id="channel-filter"><summary>渠道 <span id="channel-selection">全部</span></summary><div class="filter-popover"><input type="search" placeholder="搜索渠道名称或 ID" aria-label="搜索渠道"><div class="filter-actions"><button type="button" data-select="all">全部</button><button type="button" data-select="none">清空</button></div><div class="filter-options"></div></div></details>
+          <details class="multi-filter" id="model-filter"><summary>模型 <span id="model-selection">全部</span></summary><div class="filter-popover"><input type="search" placeholder="搜索模型" aria-label="搜索模型"><div class="filter-actions"><button type="button" data-select="all">全部</button><button type="button" data-select="none">清空</button></div><div class="filter-options"></div></div></details>
+          <button id="reset-filters" class="quiet">重置筛选</button><span id="usage-status" role="status">连接数据库…</span>
+        </div>
+      </section>
+      <div id="usage-error" class="notice notice-error" role="alert" hidden></div>
+      <div id="usage-empty" class="usage-empty" hidden><strong>这个时间范围还没有调用记录</strong><p>新请求会自动记录。可调整时间或渠道 / 模型筛选；启用之前的内存计数无法还原历史。</p></div>
+      <section id="usage-kpis" class="usage-kpis" aria-label="用量汇总"></section>
+      <section id="uptime" class="usage-panel uptime-panel" aria-labelledby="uptime-title" hidden>
+        <div class="usage-panel-heading"><div><div class="uptime-eyebrow">CHANNEL STATUS HISTORY</div><h2 id="uptime-title">渠道 Uptime <span class="heading-tag">3 MIN / SAMPLE</span></h2><p>模型独立观测 · 仅显示已启用路由 · 历史每三分钟记录，右侧为最新</p></div><div class="chart-controls"><label>模型<select id="uptime-model" aria-label="Uptime 模型"></select></label><label>历史范围<select id="uptime-hours"><option value="6">近 6 小时</option><option value="24" selected>近 24 小时</option><option value="72">近 3 天</option><option value="168">近 7 天</option></select></label><button id="uptime-latest" type="button">最新 →</button></div></div>
+        <div class="uptime-key"><span><i class="uptime-green"></i>可用</span><span><i class="uptime-yellow"></i>单项达到阈值</span><span><i class="uptime-red"></i>已熔断</span><span><i class="uptime-unknown"></i>未采样</span><span id="uptime-status" role="status"></span></div>
+        <div id="uptime-history" class="uptime-history"></div>
+        <p class="uptime-note">红色为实际阻断（普通渠道共享熔断、额度或人工）；黄色按所选模型自身窗口判断。绿色含无请求时段，不代表主动探测成功。可用采样率 = 非红色 / 已采样；停机与启用前留灰。历史保留 30 天。</p>
+      </section>
+      <div class="usage-charts">
+        <section class="usage-panel"><div class="usage-panel-heading"><div><h2>调用趋势</h2><p>点击色块聚焦 · 再次点击或 Esc 取消 · 明细联动时段</p></div><div class="chart-controls"><select id="calls-metric" aria-label="调用指标"><option value="attempts">全部调用</option><option value="success">成功次数</option><option value="failed">失败次数</option></select><select id="calls-stack" aria-label="调用堆叠维度"><option value="channel">按渠道堆叠</option><option value="model">按模型堆叠</option><option value="outcome">按结果堆叠</option></select></div></div><div id="calls-chart" class="usage-chart"></div><div id="calls-legend" class="usage-legend"></div></section>
+        <section class="usage-panel"><div class="usage-panel-heading"><div><h2>Token 消耗</h2><p>输入已包含缓存 · 推理 token 是输出的子集</p></div><div class="chart-controls"><select id="tokens-metric" aria-label="Token 指标"><option value="composition">Token 构成</option><option value="totalTokens">总 token</option><option value="inputTokens">输入 token</option><option value="outputTokens">输出 token</option><option value="cachedInputTokens">缓存 token</option><option value="reasoningTokens">推理 token</option></select><select id="tokens-stack" aria-label="Token 堆叠维度"><option value="channel">按渠道堆叠</option><option value="model">按模型堆叠</option></select></div></div><div id="tokens-chart" class="usage-chart"></div><div id="tokens-legend" class="usage-legend"></div></section>
+        <section class="usage-panel cache-panel"><div class="usage-panel-heading"><div><h2>缓存命中率</h2><p>Σ 缓存输入 / Σ 输入 · 空时段补零，悬浮查看原始值；平滑曲线仅用于展示</p></div><select id="cache-stack" aria-label="缓存曲线维度"><option value="channel">按渠道对比</option><option value="model">按模型对比</option><option value="total">整体命中率</option></select></div><div id="cache-filters" class="cache-filters"><span class="cache-filter-hint">快速筛选 · 与顶部同步</span></div><div id="cache-chart" class="usage-chart"></div><div id="cache-legend" class="usage-legend"></div></section>
+      </div>
+      <section class="usage-panel usage-details"><div class="usage-panel-heading"><div><h2>渠道 × 模型明细 <span id="detail-count" class="heading-tag"></span></h2><p id="detail-scope">所选范围汇总 · 点击列标题排序</p></div><div class="btn-row"><button id="clear-bucket" hidden>× 取消时段聚焦</button><input type="search" id="detail-search" placeholder="搜索明细…" aria-label="搜索渠道模型明细"></div></div><div class="usage-table-scroll"><table id="usage-table"><thead><tr>
+        <th><button data-sort="channel">渠道 / 模型</button></th><th><button data-sort="attempts">调用 ↕</button></th><th><button data-sort="success">成功</button></th><th><button data-sort="failed">失败</button></th><th><button data-sort="cancelled">取消 / 中断</button></th><th><button data-sort="successRate">成功率</button></th><th><button data-sort="inputTokens">输入</button></th><th><button data-sort="outputTokens">输出</button></th><th><button data-sort="cachedInputTokens">缓存输入</button></th><th><button data-sort="cacheRate">缓存率</button></th><th><button data-sort="coverage">Usage 覆盖</button></th><th><button data-sort="latency">平均耗时</button></th>
+      </tr></thead><tbody></tbody></table></div><div class="usage-pagination"><span id="table-note"></span><div class="btn-row"><button id="prev-page">←</button><span id="page-label"></span><button id="next-page">→</button></div></div></section>
+      <details class="usage-definitions"><summary>统计口径与数据存储</summary><p>按尝试开始时间归档，范围包含开始日期与结束日期的全天。调用 = 成功 + 失败 + 客户端取消 + 进程中断 + 进行中；一次客户端请求可能因 fallback 产生多次调用。成功率只计算成功 /（成功 + 失败）。Compact 自动能力探测、管理接口、健康检查、响应缓存读取不计入。</p><p>只保存上游实际报告的数字，不估算未知 token。Usage 覆盖 = 同时报告输入与输出的已结束调用占比；缓存率另以同时报告输入和缓存字段的记录加权。图例最多展示 8 个主要系列，其余归为「其他」。时间分桶使用所选固定 UTC 偏移，不随夏令时变化。</p><p id="storage-info"></p></details>
+      <footer class="workspace-footer"><span>Persistent usage · SQLite / per instance</span><a href="/admin/monitor">查看实时健康 ↗</a></footer>
+    </main>
+  </div>
+</div>
+<div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
+<script src="/admin/assets/usage.js"></script>
+</body></html>

@@ -1,179 +1,152 @@
 # Configuration
 
-The proxy reads scalar runtime settings from environment variables and structured fallback and model settings from JSON files.
+The proxy reads scalar runtime settings from environment variables and all channel/model routing from one JSON document at `FALLBACK_CONFIG_PATH`.
 
-Use this page in two passes:
+## Routing Document
 
-1. Fill the required provider fields.
-2. Keep the recommended defaults unless you already know why your upstream needs something different.
+`fallback.json` is the single source of truth for upstream channels, canonical model routes, aliases, the default model, and the optional compact route:
 
-## Required Fields
-
-These are the minimum fields needed to call an upstream provider:
-
-```env
-PRIMARY_PROVIDER_NAME=primary-provider
-PRIMARY_PROVIDER_BASE_URL=https://provider.example
-PRIMARY_PROVIDER_API_KEY=your_api_key_here
+```json
+{
+  "default_model": "gpt-5.4",
+  "channels": [
+    {
+      "id": "provider-a",
+      "name": "Provider A",
+      "base_url": "https://provider-a.example",
+      "api_key": "replace-me"
+    },
+    {
+      "id": "provider-b",
+      "base_url": "https://provider-b.example",
+      "api_key": "replace-me"
+    }
+  ],
+  "models": {
+    "gpt-5.4": { "channel_ids": ["provider-a", "provider-b"] },
+    "gpt-5.2": { "channel_ids": ["provider-b", "provider-a"] }
+  },
+  "aliases": {
+    "gpt-latest": "gpt-5.4"
+  },
+  "compact": {
+    "model": "gpt-5.4",
+    "channel_ids": ["provider-a", "provider-b"]
+  }
+}
 ```
 
-The proxy calls:
+Rules:
 
-- `PRIMARY_PROVIDER_BASE_URL + /v1/responses`
-- `PRIMARY_PROVIDER_BASE_URL + /v1/models`
+- Channel IDs are stable unique identifiers. `name` is display-only and defaults to `id`.
+- Each model route uses its own ordered `channel_ids`; channel array order does not control routing.
+- Aliases target canonical model names only. They do not own separate routes or health state.
+- `default_model` may be a canonical model or an alias; runtime stores the canonical target.
+- All channels receive the same canonical model string for a routed request.
+- `fallback.json` and `fallback.json.bak` contain inline credentials and must remain mode `0600`.
 
-If the base URL does not expose those endpoints, the proxy cannot work.
+Validation rejects legacy fallback arrays, env-key references, duplicate channels, unknown channel IDs, alias chains, and unknown defaults. A channel may set `disable_cooldown: true` to bypass ordinary automatic breakers; quota and administrator blocks still apply.
 
-## Common Fields Most Users Change
+## Compact Route
 
-These are the settings most users touch during setup:
+The optional `compact` section routes OpenAI-style context compaction through its own ordered channel lists with the same health and fallback machinery as model routes:
+
+```json
+"compact": {
+  "model": "gpt-5.4",
+  "channel_ids": ["provider-a", "provider-b"],
+  "v2_channel_ids": ["provider-c"]
+}
+```
+
+- **v1** (unary `POST /v1/responses/compact`): `model` pins the canonical model used for every v1 compact call (aliases resolved; client-supplied `model` overridden). `channel_ids` is the ordered v1 fallback list.
+- **v2** (codex remote compaction v2): clients send a normal streaming `POST /v1/responses` whose `input` array ends with `{"type":"compaction_trigger"}`. `v2_channel_ids` (optional) is the dedicated v2 fallback list. The client's conversation model is forwarded unchanged, and the proxy forwards or synthesizes `x-codex-beta-features: remote_compaction_v2`.
+- v1 and v2 channel capabilities are disjoint in practice (OAuth relays are usually v2-only; API-key relays are usually v1-only) — configure and detect them separately.
+- Compact ordinary failures are isolated under `compact:<model>` for v1 and `compact-v2:<model>` for v2. Only quota exhaustion and administrator actions block the entire channel across protocols.
+- When every compact channel is health-blocked before any attempt, the proxy returns `503 compact_channels_unavailable` (v1) / `503 compact_v2_channels_unavailable` (v2); once at least one upstream attempt failed, the standard `fallback_exhausted` semantics apply.
+- With no `compact` section configured, the v1 endpoint answers `501 compact route not configured` and v2-trigger requests route through the regular model routes.
+- Compaction streams carry no `output_text`: `compaction` output items count as meaningful output (no `stream_no_text_content` false fallback), v2 requests are exempt from the first-text timeout, and the `response.compaction` object value survives normalization.
+
+Compact support detection probes each configured channel with minimal real compact requests for both protocols (small token cost) after config load and via the admin UI's Detect button. Results are cached per channel fingerprint plus compact model plus protocol and are advisory only; they never mutate circuit-breaker state. The v2 `bridge_only` status marks endpoints that accept the request but return a plain-message bridge instead of a real encrypted compaction item.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PROXY_COMPACT_TIMEOUT_MS` | `300000` | Total time budget for one upstream compact attempt. |
+| `PROXY_COMPACT_DETECT_ENABLED` | `1` | Auto-detect compact support after config load. |
+| `PROXY_COMPACT_DETECT_TIMEOUT_MS` | `45000` | Per-channel probe timeout during detection. |
+
+## Common `.env` Fields
 
 ```env
-PRIMARY_PROVIDER_DEFAULT_MODEL=my-model-v2
 PORT=11234
 HOST=0.0.0.0
 INSTANCE_NAME=proxy-11234
 PROXY_ENV_PATH=./instances/proxy-11234/.env
 FALLBACK_CONFIG_PATH=./instances/proxy-11234/fallback.json
-MODEL_MAP_PATH=./instances/proxy-11234/model-map.json
 ```
 
-- `PRIMARY_PROVIDER_DEFAULT_MODEL` provides a convenient default model name for testing.
-- `PORT` and `HOST` control the listener address.
-- `INSTANCE_NAME` labels logs, admin output, and captures.
-- `PROXY_ENV_PATH` tells the admin config API which `.env` file to read and write.
-- `FALLBACK_CONFIG_PATH` and `MODEL_MAP_PATH` should usually point at gitignored runtime files, not tracked `*.example` files.
+`PORT`, `HOST`, and `PROXY_ENV_PATH` require a process restart to take full effect. The admin API can reload routing and most scalar settings at runtime after validation.
 
-The shipped example keeps `HOST=0.0.0.0` so the same runtime files also work in Docker. For a local-only first run outside Docker, set `HOST=127.0.0.1`.
-
-### Restart-Required Fields
-
-Changes to `PORT` or `HOST` are detected at runtime reload but require a full process restart to take effect. When the admin UI or reload endpoint detects these changes, `restartRequiredFields` lists them and the UI shows a restart-required notice.
-
-Changing `PROXY_ENV_PATH` also requires a process restart because it is read only at startup.
-
-## Advanced Runtime Controls
-
-Most users should leave these alone on the first run.
-
-### Runtime Reference
+## Runtime Reference
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `11234` | Listener port. |
-| `HOST` | `0.0.0.0` | Listener host. Use `127.0.0.1` for a local-only first run outside Docker. |
-| `INSTANCE_NAME` | `responses-proxy-${PORT}` | Logical instance name for logs, captures, and admin output. |
-| `PROXY_ENV_PATH` | `.env` | `.env` file used by startup and admin editing. |
-| `PROXY_ADMIN_ALLOW_HOST` | `0` | Allow non-localhost `/admin` requests when explicitly enabled; keep the published port on a trusted host. |
-| `FALLBACK_CONFIG_PATH` | `config.json` | Fallback provider JSON path. |
-| `MODEL_MAP_PATH` | `model-map.json` | Model mapping JSON path. |
-| `PROXY_MAX_CONCURRENT_REQUESTS` | `512` | Maximum active proxy requests before overload rejection. |
-| `PROXY_MAX_CACHED_RESPONSES` | `200` | Maximum cached response lookup entries. |
+| `HOST` | `0.0.0.0` | Listener host. Use `127.0.0.1` for local-only runs. |
+| `INSTANCE_NAME` | `responses-proxy-${PORT}` | Logical name for logs, captures, and admin output. |
+| `PROXY_ENV_PATH` | `.env` | `.env` file read by startup and admin editing. |
+| `FALLBACK_CONFIG_PATH` | `fallback.json` | Routing config path. |
+| `PROXY_ADMIN_ALLOW_HOST` | `0` | Allow non-localhost `/admin` requests when explicitly enabled. |
+| `PROXY_MAX_CONCURRENT_REQUESTS` | `512` | Maximum active proxy requests. |
+| `PROXY_MAX_CACHED_RESPONSES` | `200` | Cached response lookup entries. |
 | `PROXY_FORCE_STORE_FALSE` | `0` | Inject `store: false` for upstream compatibility. |
 
-The tracked example directories under `instances/example-*` are templates. Real deployments should copy them to gitignored runtime files such as `instances/proxy-11234/.env`, `instances/proxy-11234/fallback.json`, and `instances/proxy-11234/model-map.json`.
-
-`PROXY_ADMIN_ALLOW_HOST=1` is mainly intended for Docker deployments that publish the proxy to `127.0.0.1` on the host and want the host browser to access `/admin`. When enabled, non-localhost `/admin` requests are accepted too, so keep that port bound to a trusted host or add external protection.
-
-### Timeout Settings
-
-Code defaults:
+## Timeout Settings
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PROXY_UPSTREAM_TIMEOUT_MS` | `8000` | Initial stream connection setup. |
-| `PROXY_NON_STREAM_TIMEOUT_MS` | `20000` | Non-streaming upstream request lifetime. |
-| `PROXY_FIRST_BYTE_TIMEOUT_MS` | `8000` | Waiting for the first response body chunk. |
-| `PROXY_FIRST_TEXT_TIMEOUT_MS` | `0` | Waiting for recognized text in normalized streams; `0` disables this guard. |
-| `PROXY_STREAM_IDLE_TIMEOUT_MS` | `15000` | Maximum gap between stream body chunks. |
+| `PROXY_NON_STREAM_TIMEOUT_MS` | `20000` | Non-streaming upstream lifetime. |
+| `PROXY_FIRST_BYTE_TIMEOUT_MS` | `8000` | Waiting for the first body chunk. |
+| `PROXY_FIRST_TEXT_TIMEOUT_MS` | `0` | Waiting for recognized text in normalized streams; `0` disables it. |
+| `PROXY_STREAM_IDLE_TIMEOUT_MS` | `15000` | Maximum gap between stream chunks. |
 | `PROXY_TOTAL_REQUEST_TIMEOUT_MS` | `45000` | Total proxy request lifetime. |
-| `PROXY_MAX_FALLBACK_ATTEMPTS` | fallback endpoint count, minimum `1` | Maximum fallback endpoints to try. |
-| `PROXY_MAX_FALLBACK_TOTAL_MS` | `30000` | Time budget for fallback attempts. |
+| `PROXY_MAX_FALLBACK_TOTAL_MS` | `30000` | Time budget for scanning configured route channels. |
 
-### Recommended Profiles
+Keep `PROXY_TOTAL_REQUEST_TIMEOUT_MS` larger than `PROXY_MAX_FALLBACK_TOTAL_MS` so fallback exhaustion can return a controlled response.
 
-#### Local Development
+## Health and Fallback Controls
 
-Use when you want quick local testing on one machine.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PROXY_HEALTH_WINDOW_MS` | `180000` | Sliding window of completed upstream attempts. |
+| `PROXY_HEALTH_FAILURE_THRESHOLD` | `15` | Minimum failures in the window. |
+| `PROXY_HEALTH_FAILURE_RATE_THRESHOLD` | `0.5` | Failure ratio must be strictly greater than this value, in addition to the minimum count. |
+| `PROXY_HEALTH_COOLDOWN_MS` | `600000` | Ordinary and manual breaker duration. |
+| `PROXY_CHANNEL_MAX_ATTEMPTS` | `3` | Total attempts per channel per client request, including the first. |
+| `PROXY_CHANNEL_RETRY_DELAY_MS` | `500` | Delay between attempts on the same channel; no delay when moving to another channel. |
+| `PROXY_CACHE_KEY_POOL_SIZE` | `100` | Exact-key LRU history capacity; never overrides route priority. |
+| `PROXY_QUOTA_COOLDOWN_MS` | `7200000` | Cooldown after an upstream reports quota/spend exhaustion (for example `codex_quota_exhausted`, `额度已用完`). This breaker also applies to channels with `disable_cooldown` and shows as a violet `quota` badge on the monitor. |
+| `PROXY_FALLBACK_ON_RETRYABLE_4XX` | `1` | Retry selected retryable client-status upstream failures. |
+| `PROXY_FALLBACK_ON_COMPAT_4XX` | `1` | Retry configured compatibility-pattern 4xx failures. |
+| `PROXY_FALLBACK_COMPAT_PATTERNS` | built-in list | Extra messages that qualify for compatibility fallback. |
+| `PROXY_NO_FALLBACK_CLIENT_ERROR_PATTERNS` | built-in list | Client-input errors that must not fall back. |
 
-```env
-PROXY_STREAM_MODE=normalized
-PROXY_MAX_CONCURRENT_REQUESTS=32
-PROXY_MAX_CACHED_RESPONSES=50
-```
+Health scopes:
 
-#### General Stable Proxy
+- Ordinary Responses models share one channel-level window; compact uses the isolated scopes described above. Two failures followed by success count as two failures and one success, not one successful request. Cancellation, client-input and proxy-internal errors do not enter the window.
+- Every request starts at the highest-priority available channel, retries it up to the attempt limit, then moves forward. A later request returns to recovered higher-priority channels. The key pool tracks session history, without deduplication or sticky fallback routing.
+- Quota exhaustion blocks the whole channel immediately, even with `disable_cooldown`. A delayed concurrent success never clears it. Administrator recovery or expiry permits requests again; a new quota error re-arms it.
+- `/admin/monitor` exposes immediate open/restore actions. Restore clears all channel blocks and decision windows, retaining cumulative usage. Actions invalidate older health results. `POST /admin/channels/breaker` requires `channelId`, current `fingerprint`, and `action: "open" | "close"`.
+- Successful output without usage is returned without retries; absent token fields stay unknown. SSE already sent to the client is never replayed.
 
-Recommended starting point for most deployments.
+Legacy `PROXY_CHANNEL_COOLDOWN_MS`, `PROXY_MODEL_CHANNEL_COOLDOWN_MS`, `PROXY_CHANNEL_FAILURE_THRESHOLD`, `PROXY_MODEL_CHANNEL_FAILURE_THRESHOLD`, and `PROXY_HALF_OPEN_MAX_PROBES` are ignored with a warning. New policy values are validated and hot-reloaded; existing active cooldown deadlines are preserved.
 
-```env
-PROXY_UPSTREAM_TIMEOUT_MS=50000
-PROXY_NON_STREAM_TIMEOUT_MS=240000
-PROXY_FIRST_BYTE_TIMEOUT_MS=40000
-PROXY_FIRST_TEXT_TIMEOUT_MS=120000
-PROXY_STREAM_IDLE_TIMEOUT_MS=70000
-PROXY_TOTAL_REQUEST_TIMEOUT_MS=700000
-PROXY_MAX_FALLBACK_TOTAL_MS=480000
-PROXY_MAX_CONCURRENT_REQUESTS=128
-PROXY_MAX_CACHED_RESPONSES=200
-```
+If every candidate is blocked before any upstream request starts, the proxy returns `503 model_channels_unavailable` with `Retry-After`. If at least one upstream request starts and all usable route entries fail, it preserves `fallback_exhausted` semantics.
 
-#### Long Streaming Outputs
+Reload validates the full candidate configuration first, then commits the runtime snapshot, health settings and topology synchronously. Stale leases from old requests cannot mutate the new topology.
 
-Use when providers are slow or long-form generation often pauses between chunks.
-
-```env
-PROXY_FIRST_TEXT_TIMEOUT_MS=120000
-PROXY_STREAM_IDLE_TIMEOUT_MS=70000
-PROXY_TOTAL_REQUEST_TIMEOUT_MS=700000
-```
-
-Increase timeouts if your upstream produces long pauses before first text or between chunks. Decrease them if you want the proxy to fail fast and move to fallback sooner. Keep `PROXY_TOTAL_REQUEST_TIMEOUT_MS` larger than `PROXY_MAX_FALLBACK_TOTAL_MS` so fallback exhaustion can still return a controlled response.
-
-The tracked `.env.example` files intentionally use these recommended values, which are more conservative than some code defaults such as `PROXY_MAX_FALLBACK_TOTAL_MS=30000`.
-
-Example stable starting values:
-
-```env
-PROXY_UPSTREAM_TIMEOUT_MS=50000
-PROXY_NON_STREAM_TIMEOUT_MS=240000
-PROXY_FIRST_BYTE_TIMEOUT_MS=40000
-PROXY_FIRST_TEXT_TIMEOUT_MS=120000
-PROXY_STREAM_IDLE_TIMEOUT_MS=70000
-PROXY_TOTAL_REQUEST_TIMEOUT_MS=700000
-PROXY_MAX_FALLBACK_TOTAL_MS=480000
-```
-
-### Stream Mode
-
-```env
-PROXY_STREAM_MODE=normalized
-```
-
-Supported values:
-
-- `normalized` - parse upstream SSE events, normalize Responses-style payloads, and buffer pre-text metadata until text is recognized.
-- `raw` - pass upstream SSE through with less proxy-side interpretation.
-
-Clients can override stream mode per request with `proxy_stream_mode` in the request body or the `X-Proxy-Stream-Mode` header.
-
-### Fallback Policy And Circuit Breaker
-
-```env
-PROXY_FALLBACK_ON_RETRYABLE_4XX=1
-PROXY_FALLBACK_ON_COMPAT_4XX=1
-PROXY_FALLBACK_COMPAT_PATTERNS=model not found,unsupported model,store must be false
-PROXY_NO_FALLBACK_CLIENT_ERROR_PATTERNS=maximum context length,input too large
-PROXY_ENDPOINT_TIMEOUT_COOLDOWN_MS=120000
-PROXY_ENDPOINT_INVALID_RESPONSE_COOLDOWN_MS=120000
-PROXY_ENDPOINT_AUTH_COOLDOWN_MS=1800000
-PROXY_ENDPOINT_FAILURE_THRESHOLD=1
-PROXY_ENDPOINT_HALF_OPEN_MAX_PROBES=1
-```
-
-These settings control which upstream failures trigger fallback and how long endpoints stay cooled down after failures.
-
-### Request Normalization
+## Request Normalization
 
 ```env
 PROXY_CONVERT_SYSTEM_TO_DEVELOPER=1
@@ -184,75 +157,24 @@ PROXY_OVERRIDE_INSTRUCTIONS_TEXT=
 PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line
 ```
 
-Use these only when an upstream provider needs compatibility adjustments. `PROXY_CONVERT_SYSTEM_TO_DEVELOPER` is enabled by default.
+`PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line` removes gateway attribution lines that can break prompt-cache prefix stability. `strip_cch` keeps the line and removes only dynamic `cch=...` fields.
 
-`PROXY_CLAUDE_BILLING_HEADER_MODE` handles Claude Code / Anthropic attribution lines that may be converted into OpenAI Responses `instructions` or system/developer input text by upstream gateways:
+## Stream Mode
 
-- `strip_line` - default. Removes the whole `x-anthropic-billing-header: ...` line from `instructions` and system/developer text blocks, which keeps prompt prefixes stable for cache matching.
-- `strip_cch` - keeps the billing header line but removes only dynamic `cch=...` fields.
-
-User-role content is not sanitized by this setting, so pasted user text is left intact.
-
-## Fallback Providers
-
-Prefer `api_key_env` so secrets stay in environment files instead of JSON:
-
-```json
-{
-  "fallback_api_config": [
-    {
-      "name": "fallback-a",
-      "base_url": "https://fallback-a.example",
-      "api_key_env": "FALLBACK_A_API_KEY"
-    }
-  ]
-}
+```env
+PROXY_STREAM_MODE=normalized
 ```
 
-## Model Mappings
+- `normalized` parses upstream SSE events and forwards Responses-style events.
+- `raw` passes upstream SSE through with less interpretation.
 
-Model mappings rewrite the upstream request model while preserving the client-facing requested model in normalized responses:
+Clients can override stream mode with request body `proxy_stream_mode` or the `X-Proxy-Stream-Mode` header.
 
-```json
-{
-  "model_mappings": {
-    "public-alias-model": "my-model-v2"
-  }
-}
-```
+## Admin Editing and Secrets
 
-## Config File Paths and Admin Editing
+The admin UI edits `.env` and `fallback.json`. Channel API keys are masked on read and require explicit replacement. Routing saves create `.bak` backups, write sensitive JSON with `0600`, validate before reload, and retain the previous runtime snapshot if reload fails.
 
-The proxy uses three config files controlled by environment variables:
-
-| File | Default Path | Env Variable | Editable via Admin |
-| --- | --- | --- | --- |
-| `.env` | `.env` | `PROXY_ENV_PATH` | Yes |
-| Fallback JSON | `config.json` | `FALLBACK_CONFIG_PATH` | Yes |
-| Model map JSON | `model-map.json` | `MODEL_MAP_PATH` | Yes |
-
-`PROXY_ENV_PATH` overrides the `.env` file location. When set, the admin config API reads from and writes to this path. The admin UI at `/admin` allows editing all three files through the browser, but only from localhost.
-
-### Secret Handling
-
-Environment keys containing `KEY`, `TOKEN`, or `SECRET` are treated as secrets:
-
-- Read: `GET /admin/config` returns `***`, never the actual value.
-- Edit: secret fields are masked and require explicit replacement.
-- Save: `PUT /admin/config` supports `keep`, `replace`, and `clear` actions. If omitted, `keep` is assumed.
-
-### `.env` Formatting Limitations
-
-When the admin API writes the `.env` file, it normalizes formatting:
-
-- Comments, quotes, and multiline values are not preserved.
-- Clearing a key from `.env` does not remove an inherited `process.env` value until the process restarts.
-
-For security-sensitive clearing, restart the proxy after saving.
-
-### Runtime Path Resolution
-
-Admin config paths for fallback JSON and model-map JSON are derived from the current runtime snapshot on each request, not frozen at startup. After a reload that changes `FALLBACK_CONFIG_PATH` or `MODEL_MAP_PATH`, subsequent admin reads and writes use the new paths.
+When the admin API writes `.env`, comments, quotes, and multiline values are normalized. Clearing an inherited environment value still requires a process restart.
 
 ## Prompt Cache Hints
 
@@ -263,13 +185,9 @@ PROXY_PROMPT_CACHE_RETENTION=in_memory
 PROXY_PROMPT_CACHE_KEY=stable-prefix-key
 ```
 
-Use `PROXY_PROMPT_CACHE_KEY` only for a stable prompt prefix key. Do not include timestamps, UUIDs, request IDs, or any other per-request entropy, or cache hit rates will collapse.
+Use only stable prompt prefix keys. Do not include timestamps, UUIDs, request IDs, or other per-request entropy.
 
-Whether the provider actually honors these hints still depends on the upstream implementation.
-
-If clients reach this proxy through Claude Code-oriented gateways, keep `PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line` unless you have a specific reason to preserve attribution text. The dynamic Claude billing header often appears at the very start of `instructions`, before the stable system prompt, and can defeat prefix-based caching even when `prompt_cache_key` is stable.
-
-## Debug Settings (Keep Off By Default)
+## Debug Settings
 
 ```env
 PROXY_LOG_REQUEST_BODY=0
@@ -280,4 +198,4 @@ PROXY_STREAM_MISSING_USAGE_DEBUG=0
 PROXY_STREAM_MISSING_USAGE_DIR=captures/proxy-11234/stream/missing-usage
 ```
 
-`PROXY_LOG_REQUEST_BODY` can log raw request content and should stay disabled unless you are debugging locally. Debug captures can include sensitive prompts or provider responses. Keep these settings disabled by default and never commit capture output.
+Debug captures can contain full prompts and upstream responses. Keep them off unless actively investigating an issue.

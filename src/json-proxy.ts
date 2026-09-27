@@ -2,7 +2,13 @@ import 'dotenv/config';
 import { bootstrapHttpProxySupport } from './http-proxy-bootstrap.js';
 import { createServer } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { createUsageStore } from './usage-store.js';
+import { beginUsageAttempt, usageContext } from './usage-tracking.js';
+import { cacheKeyHistoryStats, trackCacheKey } from './cache-key-history.js';
+import { startUptimeSampling } from './uptime.js';
 
 import {
   isJsonRecord,
@@ -12,7 +18,7 @@ import {
   type JsonRecord,
   type JsonValue,
 } from './responses-input-normalization.js';
-import { type StreamMode, type UpstreamEndpoint, type ProxyRuntimeConfig } from './proxy-config.js';
+import { type StreamMode, type ProxyRuntimeConfig } from './proxy-config.js';
 import {
   classifyProxyTerminalError,
   extractErrorMessage,
@@ -26,6 +32,8 @@ import {
   extractUsageFromStreamPayload,
   extractUsageMetrics,
   formatSseEvent,
+  isCommentOnlySseChunk,
+  isKeepAliveStreamPayload,
   isResponsesStyleEventStream,
   makeResponsesStreamErrorEvent,
   normalizeResponseObject,
@@ -39,17 +47,47 @@ import {
 } from './responses-sse.js';
 import { createAdminHandler } from './admin-api.js';
 import { createConfigFileStoreFromPaths } from './config-files.js';
-import { createRuntimeConfigStore, createEndpointStateKey, type RuntimeSnapshot } from './runtime-config.js';
+import { createRuntimeConfigStore, type RuntimeSnapshot } from './runtime-config.js';
+import { classifyHealthDecision, createHealthRegistry, isQuotaExhaustedEvidence, type FailureEvidence, type HealthLease, type HealthRegistry } from './channel-health.js';
+import { buildConfiguredModelsResponse, resolveModelRoute, type ResolvedModelRoute } from './model-router.js';
+import {
+  isModelChannelsUnavailable,
+  reportChannelFailure,
+  reportChannelSuccess,
+  selectNextChannel,
+  createChannelAttempts,
+  hasAvailableChannel,
+  nextAvailableChannel,
+  type ChannelAttempts,
+  routingAttemptStats,
+} from './upstream-router.js';
+import {
+  compactV2HealthKey,
+  listConfiguredModels,
+  type ChannelConfig,
+} from './routing-config.js';
+import { createCompactDetectionService } from './compact-support.js';
+import { createCompactProxy } from './compact-proxy.js';
 
 bootstrapHttpProxySupport();
 
 const _envPath = process.env.PROXY_ENV_PATH ?? resolve('.env');
-const runtimeStore = createRuntimeConfigStore({ envPath: _envPath });
+const runtimeStore = createRuntimeConfigStore({
+  envPath: _envPath,
+  routingConfigPath: resolve(process.env.FALLBACK_CONFIG_PATH ?? 'fallback.json'),
+});
+
+const _initialSnapshot = runtimeStore.getSnapshot();
+const _usageStore = createUsageStore(resolve(dirname(process.env.PROXY_ENV_PATH ? resolve(_envPath) : _initialSnapshot.config.routingConfigPath), 'usage.sqlite'));
+const _compactDetection = createCompactDetectionService();
+const healthRegistry: HealthRegistry = createHealthRegistry(_initialSnapshot.config);
+runtimeStore.registerHealthRegistry?.(healthRegistry);
+const stopUptimeSampling = startUptimeSampling(runtimeStore, healthRegistry, _usageStore);
 
 const _adminConfigStore = createConfigFileStoreFromPaths({
   envPath: _envPath,
-  fallbackPath: runtimeStore.getSnapshot().config.fallbackConfigPath,
-  modelMapPath: runtimeStore.getSnapshot().config.modelMappingPath,
+  fallbackPath: _initialSnapshot.config.routingConfigPath,
+  modelMapPath: _initialSnapshot.config.routingConfigPath,
 });
 const _adminHandler = createAdminHandler({
   configStore: _adminConfigStore,
@@ -57,22 +95,72 @@ const _adminHandler = createAdminHandler({
   getAdminStats: () => getAdminStats(),
   clearResponseCache: () => clearResponseCache(),
   responseCacheSize: () => responseCache.size,
+  compactDetection: _compactDetection,
+  usageStore: _usageStore,
+  healthRegistry,
 });
 
-const _initialSnapshot = runtimeStore.getSnapshot();
 const _requestContext = new AsyncLocalStorage<RuntimeSnapshot>();
+const upstreamFailures = new WeakMap<AbortController, FailureEvidence>();
+
+function observeUpstreamFailure(controller: AbortController, payload: unknown, status: number): boolean {
+  if (!isJsonRecord(payload)) return false;
+  const response = isJsonRecord(payload.response) ? payload.response : payload;
+  if (response.error || response.status === 'failed' || response.status === 'incomplete' ||
+      payload.type === 'error' || payload.type === 'response.failed' || payload.type === 'response.incomplete') {
+    const evidence = { payload, status, upstreamResponseObserved: true };
+    const previous = upstreamFailures.get(controller);
+    if (!previous || classifyHealthDecision(previous).reason !== 'quota_exhausted') {
+      upstreamFailures.set(controller, evidence);
+    }
+    return true;
+  }
+  return false;
+}
 
 function getConfig(): ProxyRuntimeConfig {
   const snap = _requestContext.getStore();
   return snap ? snap.config : _initialSnapshot.config;
 }
 
+function assertNeverCompactResult(value: never): never {
+  throw new Error(`unexpected compact proxy result: ${String(value)}`);
+}
+
+const _compactProxy = createCompactProxy({
+  getConfig,
+  healthRegistry,
+  fetchWithTimeout,
+  createLinkedAbortController,
+  closeResponseBody,
+});
+
+function triggerCompactDetection(force = false): void {
+  const config = runtimeStore.getSnapshot().config;
+  const compactRoute = config.routingConfig.compactRoute;
+  _compactDetection.setModel(compactRoute?.canonicalModel ?? null);
+  if (compactRoute === undefined || !config.compactDetectEnabled) {
+    return;
+  }
+
+  void _compactDetection.detectAll(
+    Array.from(config.routingConfig.channelsById.values()),
+    compactRoute.canonicalModel,
+    { force, timeoutMs: config.compactDetectTimeoutMs },
+  ).catch(error => {
+    console.warn(`compact detection failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
 type UpstreamAttempt = {
-  endpoint: UpstreamEndpoint;
-  endpointIndex: number;
+  channel: ChannelConfig;
+  channelIndex: number;
+  lease: HealthLease;
   response: Response;
   controller: AbortController;
   dispose: () => void;
+  reportSuccess: () => void;
+  reportFailure: (evidence: FailureEvidence) => void;
 };
 
 type AbortReason =
@@ -148,22 +236,12 @@ type StreamProbeOutcome =
       fallbackReason?: FallbackReason;
     };
 
-type EndpointCircuitState = 'closed' | 'open' | 'half_open';
-
-type EndpointHealthRecord = {
-  state: EndpointCircuitState;
-  failureCount: number;
-  successCount: number;
-  cooldownUntil: number;
-  lastFailureReason: FallbackReason | 'connect_timeout' | 'body_timeout' | null;
-  lastFailureAt: number | null;
-  lastSuccessAt: number | null;
-  halfOpenProbeInFlight: number;
-};
-
-type FallbackBudget = {
+type FallbackBudget = ChannelAttempts & {
   startedAt: number;
   attemptsUsed: number;
+  route: ResolvedModelRoute;
+  betaFeaturesHeader?: string;
+  rememberChannel?: ReturnType<typeof trackCacheKey>;
 };
 
 type StreamObservation = {
@@ -177,9 +255,12 @@ type StreamObservation = {
 let activeRequests = 0;
 let requestCounter = 0;
 const responseCache = new Map<string, JsonRecord>();
-const endpointHealth = new Map<string, EndpointHealthRecord>();
 const proxyStats = {
   requestsTotal: 0,
+  compactRequestsTotal: 0,
+  compactFallbacks: 0,
+  compactV2RequestsTotal: 0,
+  compactV2Fallbacks: 0,
   responsesJson: 0,
   responsesSseNormalized: 0,
   responsesSseRaw: 0,
@@ -434,302 +515,65 @@ function createRequestId() {
   return `r${requestCounter}`;
 }
 
-function getEndpointKey(endpoint: UpstreamEndpoint) {
-  return createEndpointStateKey(endpoint);
-}
-
-function getEndpointHealth(endpoint: UpstreamEndpoint) {
-  const key = getEndpointKey(endpoint);
-  const current = endpointHealth.get(key);
-  if (current) {
-    return current;
-  }
-
-  const created: EndpointHealthRecord = {
-    state: 'closed',
-    failureCount: 0,
-    successCount: 0,
-    cooldownUntil: 0,
-    lastFailureReason: null,
-    lastFailureAt: null,
-    lastSuccessAt: null,
-    halfOpenProbeInFlight: 0,
-  };
-  endpointHealth.set(key, created);
-  return created;
-}
-
-function getEndpointHealthSnapshot(endpoint: UpstreamEndpoint) {
-  const health = getEndpointHealth(endpoint);
-  const now = Date.now();
-  const remainingMs = health.state === 'open' && health.cooldownUntil > now ? health.cooldownUntil - now : 0;
-
-  return {
-    state: health.state,
-    failureCount: health.failureCount,
-    successCount: health.successCount,
-    cooldownUntil: health.cooldownUntil,
-    remainingMs,
-    remainingSeconds: remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0,
-    lastFailureReason: health.lastFailureReason,
-    lastFailureAt: health.lastFailureAt,
-    lastSuccessAt: health.lastSuccessAt,
-    halfOpenProbeInFlight: health.halfOpenProbeInFlight,
-  };
-}
-
-function getCooldownMsForReason(reason: FallbackReason | 'connect_timeout' | 'body_timeout') {
-  if (reason === 'connect_error' || reason === 'connect_timeout' || reason === 'body_timeout' || reason === 'headers_only_timeout') {
-    return getConfig().endpointTimeoutCooldownMs;
-  }
-
-  if (reason === 'retryable_4xx' || reason === 'compat_4xx') {
-    return getConfig().endpointAuthCooldownMs;
-  }
-
-  return getConfig().endpointInvalidResponseCooldownMs;
-}
-
-function shouldOpenCircuitImmediately(reason: FallbackReason | 'connect_timeout' | 'body_timeout') {
-  return [
-    'connect_timeout',
-    'body_timeout',
-    'headers_only_timeout',
-    'retryable_4xx',
-    'compat_4xx',
-    'unknown_upstream_error',
-    'empty_response',
-    'sse_reconstruction_failure',
-  ].includes(reason);
-}
-
-function markEndpointFailure(
-  endpoint: UpstreamEndpoint,
-  reason: FallbackReason | 'connect_timeout' | 'body_timeout',
-  requestId?: string,
-  extra?: Record<string, unknown>,
-) {
-  const health = getEndpointHealth(endpoint);
-  const now = Date.now();
-  health.failureCount += 1;
-  health.lastFailureReason = reason;
-  health.lastFailureAt = now;
-
-  if (endpoint.disableCooldown) {
-    health.state = 'closed';
-    health.cooldownUntil = 0;
-    health.halfOpenProbeInFlight = 0;
-    if (requestId) {
-      logRequest(requestId, 'endpoint failure recorded without cooldown', {
-        endpointName: endpoint.name,
-        endpointUrl: endpoint.url,
-        reason,
-        endpointHealth: getEndpointHealthSnapshot(endpoint),
-        ...extra,
-      });
-    }
-    return;
-  }
-
-  const shouldOpenNow = shouldOpenCircuitImmediately(reason) || health.failureCount >= Math.max(1, getConfig().endpointFailureThreshold);
-  if (shouldOpenNow) {
-    const cooldownMs = getCooldownMsForReason(reason);
-    health.state = cooldownMs > 0 ? 'open' : 'closed';
-    health.cooldownUntil = cooldownMs > 0 ? now + cooldownMs : 0;
-    health.halfOpenProbeInFlight = 0;
-    if (requestId) {
-      logRequest(requestId, 'endpoint circuit opened', {
-        endpointName: endpoint.name,
-        endpointUrl: endpoint.url,
-        reason,
-        cooldownMs,
-        endpointHealth: getEndpointHealthSnapshot(endpoint),
-        ...extra,
-      });
-    }
-  }
-}
-
-function markEndpointSuccess(endpoint: UpstreamEndpoint, requestId?: string, extra?: Record<string, unknown>) {
-  const health = getEndpointHealth(endpoint);
-  const wasDegraded = health.state !== 'closed' || health.failureCount > 0;
-  health.state = 'closed';
-  health.failureCount = 0;
-  health.successCount += 1;
-  health.cooldownUntil = 0;
-  health.lastSuccessAt = Date.now();
-  health.halfOpenProbeInFlight = 0;
-
-  if (wasDegraded && requestId) {
-    logRequest(requestId, 'endpoint circuit recovered', {
-      endpointName: endpoint.name,
-      endpointUrl: endpoint.url,
-      endpointHealth: getEndpointHealthSnapshot(endpoint),
-      ...extra,
-    });
-  }
-}
-
-function isEndpointAvailable(endpoint: UpstreamEndpoint, requestId?: string) {
-  const health = getEndpointHealth(endpoint);
-  const now = Date.now();
-
-  if (health.state === 'open') {
-    if (health.cooldownUntil > now) {
-      if (requestId) {
-        logRequest(requestId, 'skipping upstream during circuit cooldown', {
-          endpointName: endpoint.name,
-          endpointUrl: endpoint.url,
-          endpointHealth: getEndpointHealthSnapshot(endpoint),
-        });
-      }
-      return false;
-    }
-
-    health.state = 'half_open';
-    health.halfOpenProbeInFlight = 0;
-    if (requestId) {
-      logRequest(requestId, 'endpoint circuit moved to half-open', {
-        endpointName: endpoint.name,
-        endpointUrl: endpoint.url,
-        endpointHealth: getEndpointHealthSnapshot(endpoint),
-      });
-    }
-  }
-
-  if (health.state === 'half_open' && health.halfOpenProbeInFlight >= Math.max(1, getConfig().endpointHalfOpenMaxProbes)) {
-    if (requestId) {
-      logRequest(requestId, 'skipping upstream because half-open probe is already in flight', {
-        endpointName: endpoint.name,
-        endpointUrl: endpoint.url,
-        endpointHealth: getEndpointHealthSnapshot(endpoint),
-      });
-    }
-    return false;
-  }
-
-  return true;
-}
-
-function reserveEndpointProbe(endpoint: UpstreamEndpoint) {
-  const health = getEndpointHealth(endpoint);
-  if (health.state === 'half_open') {
-    health.halfOpenProbeInFlight += 1;
-  }
-}
-
-function releaseEndpointProbe(endpoint: UpstreamEndpoint) {
-  const health = getEndpointHealth(endpoint);
-  if (health.halfOpenProbeInFlight > 0) {
-    health.halfOpenProbeInFlight -= 1;
-  }
-}
-
 function canFallbackWithinBudget(
   requestSignal: AbortSignal,
-  endpointIndex: number,
-  endpoints: UpstreamEndpoint[],
+  route: ResolvedModelRoute,
   budget: FallbackBudget,
-) {
-  if (requestSignal.aborted || endpointIndex >= endpoints.length - 1) {
-    return false;
-  }
-
-  if (budget.attemptsUsed >= Math.max(0, getConfig().maxFallbackAttempts)) {
-    return false;
-  }
-
-  if (getConfig().maxFallbackTotalMs > 0 && Date.now() - budget.startedAt >= getConfig().maxFallbackTotalMs) {
-    return false;
-  }
-
-  return true;
-}
-
-function canContinueSearchingUpstreams(
-  requestSignal: AbortSignal,
-  budget: FallbackBudget,
-  attemptedIndices: Set<number>,
-  startIndex: number,
-  endpoints: UpstreamEndpoint[],
+  _legacyStartIndex?: number,
 ) {
   if (requestSignal.aborted) {
     return false;
   }
 
-  if (budget.attemptsUsed >= Math.max(0, getConfig().maxFallbackAttempts)) {
-    return false;
-  }
-
   if (getConfig().maxFallbackTotalMs > 0 && Date.now() - budget.startedAt >= getConfig().maxFallbackTotalMs) {
     return false;
   }
 
-  return attemptedIndices.size < Math.max(0, endpoints.length - startIndex);
+  return hasAvailableChannel(route, getConfig().routingConfig, healthRegistry, budget);
 }
 
-function findNextAvailableEndpointIndex(
-  requestId: string,
-  endpoints: UpstreamEndpoint[],
-  startIndex: number,
-  searchStartIndex: number,
-  attemptedIndices: Set<number>,
-) {
-  const boundedStartIndex = Math.max(0, Math.min(startIndex, endpoints.length));
-  const boundedSearchStartIndex = Math.max(boundedStartIndex, Math.min(searchStartIndex, endpoints.length));
+class ModelChannelsUnavailableError extends Error {
+  readonly name = 'ModelChannelsUnavailableError';
 
-  const scanRange = (from: number, to: number) => {
-    for (let index = from; index < to; index += 1) {
-      if (attemptedIndices.has(index)) {
-        continue;
-      }
-
-      const endpoint = endpoints[index];
-      if (endpoint && isEndpointAvailable(endpoint, requestId)) {
-        return index;
-      }
-    }
-
-    return undefined;
-  };
-
-  return scanRange(boundedSearchStartIndex, endpoints.length) ?? scanRange(boundedStartIndex, boundedSearchStartIndex);
+  constructor(readonly retryAfterMs: number) {
+    super('model_channels_unavailable');
+  }
 }
 
-function attachEndpointToError(error: unknown, endpoint: UpstreamEndpoint, abortReason?: AbortReason) {
+function attachChannelToError(error: unknown, channel: ChannelConfig, abortReason?: AbortReason) {
   if (error instanceof Error) {
-    const enrichedError = error as Error & { abortReason?: AbortReason; endpoint?: UpstreamEndpoint };
+    const enrichedError = error as Error & { abortReason?: AbortReason; channel?: ChannelConfig };
     if (abortReason) {
       enrichedError.abortReason = abortReason;
     }
-    enrichedError.endpoint = endpoint;
+    enrichedError.channel = channel;
     return enrichedError;
   }
 
   return {
     error,
     abortReason,
-    endpoint,
+    channel,
   };
 }
 
-function getEndpointFromError(error: unknown) {
-  if (typeof error !== 'object' || error === null || !('endpoint' in error)) {
+function getChannelFromError(error: unknown) {
+  if (typeof error !== 'object' || error === null || !('channel' in error)) {
     return undefined;
   }
 
-  const endpoint = (error as { endpoint?: unknown }).endpoint;
+  const channel = (error as { channel?: unknown }).channel;
   if (
-    typeof endpoint === 'object' &&
-    endpoint !== null &&
-    'name' in endpoint &&
-    'url' in endpoint &&
-    'apiKey' in endpoint &&
-    typeof endpoint.name === 'string' &&
-    typeof endpoint.url === 'string' &&
-    typeof endpoint.apiKey === 'string'
+    typeof channel === 'object' &&
+    channel !== null &&
+    'name' in channel &&
+    'responsesUrl' in channel &&
+    'apiKey' in channel &&
+    typeof channel.name === 'string' &&
+    typeof channel.responsesUrl === 'string' &&
+    typeof channel.apiKey === 'string'
   ) {
-    return endpoint as UpstreamEndpoint;
+    return channel as ChannelConfig;
   }
 
   return undefined;
@@ -1030,53 +874,67 @@ function recordStatus(statusCode: number) {
 }
 
 function getAdminStats() {
+  const config = getConfig();
   return {
-    instanceName: getConfig().instanceName,
-    host: getConfig().host,
-    port: getConfig().port,
-    primaryProviderName: getConfig().primaryProviderName,
-    upstreamUrl: getConfig().upstreamUrl,
-    upstreamModelsUrl: getConfig().upstreamModelsUrl,
-    fallbackConfigPath: getConfig().fallbackConfigPath,
-    modelMappingPath: getConfig().modelMappingPath,
-    fallbackNames: getConfig().fallbackEndpoints.map(item => item.name),
-    modelMappings: getConfig().modelMappings,
-    activeRequests,
-    maxConcurrentRequests: getConfig().maxConcurrentRequests,
-    cachedResponses: responseCache.size,
-    maxCachedResponses: getConfig().maxCachedResponses,
-    upstreamTimeoutMs: getConfig().upstreamTimeoutMs,
-    nonStreamingRequestTimeoutMs: getConfig().nonStreamingRequestTimeoutMs,
-    firstByteTimeoutMs: getConfig().firstByteTimeoutMs,
-    firstTextTimeoutMs: getConfig().firstTextTimeoutMs,
-    streamIdleTimeoutMs: getConfig().streamIdleTimeoutMs,
-    totalRequestTimeoutMs: getConfig().totalRequestTimeoutMs,
-    defaultStreamMode: getConfig().defaultStreamMode,
-    forceStoreFalse: getConfig().forceStoreFalse,
-    clearDeveloperContent: getConfig().clearDeveloperContent,
-    clearInstructions: getConfig().clearInstructions,
-    clearSystemContent: getConfig().clearSystemContent,
-    overrideInstructionsText: getConfig().overrideInstructionsText,
-    logRequestBodies: getConfig().logRequestBodies,
-    debugSse: getConfig().debugSse,
-    fallbackOnRetryable4xx: getConfig().fallbackOnRetryable4xx,
-    fallbackOnCompat4xx: getConfig().fallbackOnCompat4xx,
-    compatFallbackPatterns: getConfig().compatFallbackPatterns,
-    clientErrorPatterns: getConfig().clientErrorPatterns,
-    endpointTimeoutCooldownMs: getConfig().endpointTimeoutCooldownMs,
-    endpointInvalidResponseCooldownMs: getConfig().endpointInvalidResponseCooldownMs,
-    endpointAuthCooldownMs: getConfig().endpointAuthCooldownMs,
-    endpointFailureThreshold: getConfig().endpointFailureThreshold,
-    endpointHalfOpenMaxProbes: getConfig().endpointHalfOpenMaxProbes,
-    maxFallbackAttempts: getConfig().maxFallbackAttempts,
-    maxFallbackTotalMs: getConfig().maxFallbackTotalMs,
-    endpointHealth: getConfig().responsesEndpoints.map(endpoint => ({
-      name: endpoint.name,
-      url: endpoint.url,
-      isFallback: endpoint.isFallback,
-      ...getEndpointHealthSnapshot(endpoint),
+    usageAvailable: true,
+    breakerControlAvailable: true,
+    healthWindowMs: config.healthWindowMs,
+    healthFailureThreshold: config.healthFailureThreshold,
+    healthFailureRateThreshold: config.healthFailureRateThreshold,
+    healthCooldownMs: config.healthCooldownMs,
+    channelMaxAttempts: config.channelMaxAttempts,
+    channelRetryDelayMs: config.channelRetryDelayMs,
+    cacheKeyHistory: cacheKeyHistoryStats(),
+    instanceName: config.instanceName,
+    host: config.host,
+    port: config.port,
+    routingConfigPath: config.routingConfigPath,
+    configuredModels: listConfiguredModels(config.routingConfig),
+    configuredChannels: Array.from(config.routingConfig.channelsById.keys()),
+    configuredChannelDetails: Array.from(config.routingConfig.channelsById.values()).map(channel => ({
+      id: channel.id,
+      name: channel.name,
     })),
-    stats: proxyStats,
+    configuredModelRoutes: Array.from(config.routingConfig.modelRoutes.values()).map(route => ({
+      canonicalModel: route.canonicalModel,
+      channelIds: route.channelIds,
+    })),
+    healthSnapshot: healthRegistry.snapshot(),
+    compactDetection: _compactDetection.getResults(),
+    activeRequests,
+    maxConcurrentRequests: config.maxConcurrentRequests,
+    cachedResponses: responseCache.size,
+    maxCachedResponses: config.maxCachedResponses,
+    upstreamTimeoutMs: config.upstreamTimeoutMs,
+    nonStreamingRequestTimeoutMs: config.nonStreamingRequestTimeoutMs,
+    firstByteTimeoutMs: config.firstByteTimeoutMs,
+    firstTextTimeoutMs: config.firstTextTimeoutMs,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs,
+    totalRequestTimeoutMs: config.totalRequestTimeoutMs,
+    defaultStreamMode: config.defaultStreamMode,
+    forceStoreFalse: config.forceStoreFalse,
+    clearDeveloperContent: config.clearDeveloperContent,
+    clearInstructions: config.clearInstructions,
+    clearSystemContent: config.clearSystemContent,
+    overrideInstructionsText: config.overrideInstructionsText,
+    logRequestBodies: config.logRequestBodies,
+    debugSse: config.debugSse,
+    fallbackOnRetryable4xx: config.fallbackOnRetryable4xx,
+    fallbackOnCompat4xx: config.fallbackOnCompat4xx,
+    compatFallbackPatterns: config.compatFallbackPatterns,
+    clientErrorPatterns: config.clientErrorPatterns,
+    channelCooldownMs: config.channelCooldownMs,
+    modelChannelCooldownMs: config.modelChannelCooldownMs,
+    quotaCooldownMs: config.quotaCooldownMs,
+    channelFailureThreshold: config.channelFailureThreshold,
+    modelChannelFailureThreshold: config.modelChannelFailureThreshold,
+    halfOpenMaxProbes: config.halfOpenMaxProbes,
+    maxFallbackTotalMs: config.maxFallbackTotalMs,
+    stats: {
+      ...proxyStats,
+      ...routingAttemptStats,
+      compactDetectionRuns: _compactDetection.getRunCount(),
+    },
   };
 }
 
@@ -1206,10 +1064,15 @@ function getStreamMode(req: import('node:http').IncomingMessage, body: JsonRecor
   return getConfig().defaultStreamMode;
 }
 
-function normalizeRequestBody(body: JsonRecord, stream: boolean): JsonRecord {
+export function isV2CompactionRequest(body: JsonRecord): boolean {
+  return Array.isArray(body.input) && body.input.some(
+    item => isJsonRecord(item) && item.type === 'compaction_trigger',
+  );
+}
+
+function normalizeRequestBody(body: JsonRecord, stream: boolean, canonicalModel: string): JsonRecord {
   const { proxy_stream_mode: _proxyStreamMode, ...rest } = body;
-  const requestedModel = typeof rest.model === 'string' ? rest.model : getConfig().defaultModel;
-  const mappedModel = getConfig().modelMappings[requestedModel] ?? requestedModel;
+  const model = canonicalModel;
   const rawInstructions =
     getConfig().overrideInstructionsText !== null
       ? getConfig().overrideInstructionsText
@@ -1221,17 +1084,13 @@ function normalizeRequestBody(body: JsonRecord, stream: boolean): JsonRecord {
       ? sanitizeClaudeBillingHeaderText(rawInstructions, getConfig().claudeBillingHeaderMode)
       : rawInstructions;
   const promptCacheRetention =
-    typeof rest.prompt_cache_retention === 'string' && ['in_memory', '24h'].includes(rest.prompt_cache_retention)
-      ? rest.prompt_cache_retention
-      : getConfig().defaultPromptCacheRetention;
+    Object.hasOwn(rest, 'prompt_cache_retention') ? null : getConfig().defaultPromptCacheRetention;
   const promptCacheKey =
-    typeof rest.prompt_cache_key === 'string' && rest.prompt_cache_key.trim().length > 0
-      ? rest.prompt_cache_key
-      : getConfig().defaultPromptCacheKey;
+    Object.hasOwn(rest, 'prompt_cache_key') ? null : getConfig().defaultPromptCacheKey;
 
   return {
     ...rest,
-    model: mappedModel,
+    model,
     ...(rest.instructions === undefined && getConfig().overrideInstructionsText === null ? {} : { instructions }),
     ...(promptCacheRetention === null ? {} : { prompt_cache_retention: promptCacheRetention }),
     ...(promptCacheKey === null ? {} : { prompt_cache_key: promptCacheKey }),
@@ -1244,56 +1103,6 @@ function normalizeRequestBody(body: JsonRecord, stream: boolean): JsonRecord {
     }),
     stream,
     ...(getConfig().forceStoreFalse ? { store: false } : {}),
-  };
-}
-
-function applyModelMappingsToModelsPayload(payload: unknown) {
-  if (!isJsonRecord(payload) || !Array.isArray(payload.data) || Object.keys(getConfig().modelMappings).length === 0) {
-    return { payload, aliasCount: 0 };
-  }
-
-  const data = payload.data.map(item => (isJsonRecord(item) ? { ...item } : item));
-  const existingIds = new Set<string>();
-  const entriesById = new Map<string, JsonRecord>();
-
-  for (const item of data) {
-    if (!isJsonRecord(item) || typeof item.id !== 'string') {
-      continue;
-    }
-
-    existingIds.add(item.id);
-    entriesById.set(item.id, item);
-  }
-
-  let aliasCount = 0;
-  for (const [alias, target] of Object.entries(getConfig().modelMappings)) {
-    if (existingIds.has(alias)) {
-      continue;
-    }
-
-    const targetEntry = entriesById.get(target);
-    if (!targetEntry) {
-      continue;
-    }
-
-    data.push({
-      ...targetEntry,
-      id: alias,
-    });
-    existingIds.add(alias);
-    aliasCount += 1;
-  }
-
-  if (aliasCount === 0) {
-    return { payload, aliasCount };
-  }
-
-  return {
-    payload: {
-      ...payload,
-      data,
-    },
-    aliasCount,
   };
 }
 
@@ -1393,6 +1202,7 @@ function extractTextLengthFromResponseObject(obj: JsonRecord): number {
 // counts. We treat a stream as having produced a tool call when we observe a
 // function/tool/custom/mcp call item, or a function_call_arguments.* event.
 const TOOL_CALL_ITEM_TYPES = new Set([
+  'compaction',
   'function_call',
   'custom_tool_call',
   'mcp_call',
@@ -1413,6 +1223,60 @@ function responseObjectHasToolCall(obj: JsonRecord): boolean {
   for (const item of obj.output) {
     if (isJsonRecord(item) && typeof item.type === 'string' && TOOL_CALL_ITEM_TYPES.has(item.type)) {
       return true;
+    }
+  }
+
+  return false;
+}
+
+function responseObjectHasMeaningfulNonTextOutput(obj: JsonRecord): boolean {
+  if (!Array.isArray(obj.output)) {
+    return false;
+  }
+
+  for (const item of obj.output) {
+    if (!isJsonRecord(item) || typeof item.type !== 'string') {
+      continue;
+    }
+
+    if (TOOL_CALL_ITEM_TYPES.has(item.type)) {
+      return true;
+    }
+
+    if (item.type === 'reasoning') {
+      if (Array.isArray(item.summary)) {
+        for (const part of item.summary) {
+          if (!isJsonRecord(part)) {
+            continue;
+          }
+          if (part.type === 'summary_text' && typeof part.text === 'string' && part.text.length > 0) {
+            return true;
+          }
+        }
+      }
+
+      if (Array.isArray(item.content)) {
+        for (const part of item.content) {
+          if (!isJsonRecord(part)) {
+            continue;
+          }
+          if (part.type === 'reasoning_text' && typeof part.text === 'string' && part.text.length > 0) {
+            return true;
+          }
+        }
+      }
+    }
+
+    if (item.type === 'message' && Array.isArray(item.content)) {
+      for (const part of item.content) {
+        if (!isJsonRecord(part)) {
+          continue;
+        }
+
+        if (part.type === 'refusal' && typeof part.refusal === 'string' && part.refusal.length > 0) {
+          return true;
+        }
+      }
     }
   }
 
@@ -1459,6 +1323,10 @@ function hasMeaningfulResponseOutput(responseObject: JsonRecord | undefined) {
     return false;
   }
 
+  if (responseObjectHasMeaningfulNonTextOutput(responseObject)) {
+    return true;
+  }
+
   for (const item of responseObject.output) {
     if (!isJsonRecord(item) || !Array.isArray(item.content)) {
       continue;
@@ -1478,6 +1346,10 @@ function hasMeaningfulResponseOutput(responseObject: JsonRecord | undefined) {
   return false;
 }
 
+function isFallbackBudget(value: readonly ChannelConfig[] | FallbackBudget): value is FallbackBudget {
+  return 'route' in value;
+}
+
 function canAttemptFallbackAfterStreamOutcome(
   outcome: {
     startedStreaming: boolean;
@@ -1485,20 +1357,74 @@ function canAttemptFallbackAfterStreamOutcome(
     wroteTextContent: boolean;
   },
   requestSignal: AbortSignal,
-  endpointIndex: number,
-  endpoints: UpstreamEndpoint[],
-  budget: FallbackBudget,
+  routeOrIndex: ResolvedModelRoute | number,
+  channelsOrBudget: readonly ChannelConfig[] | FallbackBudget,
+  budgetMaybe?: FallbackBudget,
 ) {
-  return !outcome.wroteTextContent && canFallbackWithinBudget(requestSignal, endpointIndex, endpoints, budget);
+  const budget = budgetMaybe ?? (isFallbackBudget(channelsOrBudget) ? channelsOrBudget : undefined);
+  if (budget === undefined) {
+    return false;
+  }
+  const route = typeof routeOrIndex === 'number' ? budget.route : routeOrIndex;
+  return !outcome.startedStreaming && !outcome.wroteTextContent && canFallbackWithinBudget(requestSignal, route, budget);
 }
 
 function canAttemptFallback(
   requestSignal: AbortSignal,
-  endpointIndex: number,
-  endpoints: UpstreamEndpoint[],
-  budget: FallbackBudget,
+  routeOrIndex: ResolvedModelRoute | number,
+  channelsOrBudget: readonly ChannelConfig[] | FallbackBudget,
+  budgetMaybe?: FallbackBudget,
 ) {
-  return canFallbackWithinBudget(requestSignal, endpointIndex, endpoints, budget);
+  const budget = budgetMaybe ?? (isFallbackBudget(channelsOrBudget) ? channelsOrBudget : undefined);
+  if (budget === undefined) {
+    return false;
+  }
+  const route = typeof routeOrIndex === 'number' ? budget.route : routeOrIndex;
+  return canFallbackWithinBudget(requestSignal, route, budget);
+}
+
+function readStatus(extra: Record<string, unknown> | undefined): number | undefined {
+  return typeof extra?.upstreamStatus === 'number' ? extra.upstreamStatus : undefined;
+}
+
+function readAbortReason(reason: FallbackReason | 'connect_timeout' | 'body_timeout', extra: Record<string, unknown> | undefined): AbortReason | undefined {
+  const phase = extra?.phase;
+  if (typeof phase !== 'string') {
+    return undefined;
+  }
+
+  if (reason === 'connect_timeout' && phase === 'connect') {
+    return { kind: 'timeout', phase };
+  }
+
+  if ((reason === 'body_timeout' || reason === 'headers_only_timeout') && (phase === 'first-byte' || phase === 'first-text' || phase === 'idle' || phase === 'total')) {
+    return { kind: 'timeout', phase };
+  }
+
+  return undefined;
+}
+
+function normalizeFailureReason(reason: FallbackReason | 'connect_timeout' | 'body_timeout'): FallbackReason {
+  return reason === 'connect_timeout' || reason === 'body_timeout' ? 'headers_only_timeout' : reason;
+}
+
+function reportAttemptFailure(
+  attempt: UpstreamAttempt,
+  reason: FallbackReason | 'connect_timeout' | 'body_timeout',
+  _requestId?: string,
+  extra?: Record<string, unknown>,
+) {
+  attempt.reportFailure({
+    fallbackReason: normalizeFailureReason(reason),
+    status: readStatus(extra),
+    error: extra?.error,
+    abortReason: readAbortReason(reason, extra),
+    upstreamResponseObserved: true,
+  });
+}
+
+function reportAttemptSuccess(attempt: UpstreamAttempt, _requestId?: string, _extra?: Record<string, unknown>) {
+  attempt.reportSuccess();
 }
 
 async function readJsonBody(req: import('node:http').IncomingMessage) {
@@ -1568,52 +1494,111 @@ function createLinkedAbortController(parentSignal: AbortSignal) {
 
 async function fetchResponsesUpstream(
   requestId: string,
+  modelRoute: ResolvedModelRoute,
   upstreamBody: JsonRecord,
   parentSignal: AbortSignal,
   streamResponse: boolean,
   budget: FallbackBudget,
-  startIndex = 0,
+  _legacyStartIndex?: number,
 ): Promise<UpstreamAttempt> {
-  const endpoints = getConfig().responsesEndpoints;
+  const config = getConfig();
+  const route = modelRoute;
   const connectTimeoutMs = getResponsesConnectTimeoutMs(streamResponse);
+  const attemptedChannelIds = budget.attemptedChannelIds;
 
-  const boundedStartIndex = Math.max(0, Math.min(startIndex, endpoints.length));
-  const attemptedIndices = new Set<number>();
-  let searchStartIndex = boundedStartIndex;
+  const nextChannelName = () => {
+    return nextAvailableChannel(route, config.routingConfig, healthRegistry, budget)?.name ?? null;
+  };
 
   while (true) {
-    const index = findNextAvailableEndpointIndex(requestId, endpoints, boundedStartIndex, searchStartIndex, attemptedIndices);
-    if (index === undefined) {
-      break;
+    if (attemptedChannelIds.size > 0) {
+      const next = nextAvailableChannel(route, config.routingConfig, healthRegistry, budget);
+      if (next && budget.counts.has(next.id) && config.channelRetryDelayMs > 0) {
+        try { await delay(config.channelRetryDelayMs, undefined, { signal: parentSignal }); }
+        catch (error) { throw Object.assign(error as Error, { abortReason: getAbortReason(parentSignal) }); }
+      }
+      if (!canFallbackWithinBudget(parentSignal, route, budget)) throw new Error('No model channel available after fallback attempts');
+    }
+    const selection = selectNextChannel(route, config.routingConfig, healthRegistry, budget);
+    if (!selection.ok) {
+      if (isModelChannelsUnavailable(selection, attemptedChannelIds) && attemptedChannelIds.size === 0) {
+        throw new ModelChannelsUnavailableError(selection.retryAfterMs);
+      }
+      throw new Error('No model channel available after fallback attempts');
     }
 
-    const endpoint = endpoints[index];
+    const { channel, channelIndex, lease } = selection;
+    const channelAttemptNumber = budget.counts.get(channel.id)!;
+    logRequest(requestId, channelAttemptNumber > 1 ? 'retrying same upstream channel' : 'selected upstream channel', {
+      channelId: channel.id, channelAttempt: channelAttemptNumber, maxAttempts: budget.maxAttempts,
+      routePosition: channelIndex + 1,
+    });
 
     const linkedController = createLinkedAbortController(parentSignal);
-    reserveEndpointProbe(endpoint);
+    const usageAttempt = beginUsageAttempt(channel, String(upstreamBody.model), route.canonicalModel.startsWith('compact-v2:') ? 'compact-v2' : 'responses', linkedController.controller.signal);
+    let healthCompleted = false;
 
-    if (index > 0) {
+    const reportSuccess = () => {
+      const failure = upstreamFailures.get(linkedController.controller);
+      if (failure) { reportFailure(failure); return; }
+      usageAttempt.result('success');
+      if (healthCompleted) {
+        return;
+      }
+      reportChannelSuccess(lease, healthRegistry);
+      budget.rememberChannel?.(channel);
+      healthCompleted = true;
+    };
+
+    const reportFailure = (evidence: FailureEvidence) => {
+      evidence = { ...evidence, ...upstreamFailures.get(linkedController.controller) };
+      usageAttempt.result('failed', evidence.fallbackReason ?? 'upstream_error');
+      if (evidence.status !== undefined) usageAttempt.row.status = evidence.status;
+      if (healthCompleted) {
+        return;
+      }
+      reportChannelFailure(lease, healthRegistry, evidence);
+      healthCompleted = true;
+    };
+
+    const dispose = () => {
+      if (!healthCompleted) {
+        healthRegistry.complete(lease, {
+          scope: 'none',
+          success: false,
+          reason: 'disposed',
+          channelReachabilityProven: false,
+        });
+        healthCompleted = true;
+      }
+      linkedController.dispose();
+      usageAttempt.finish();
+    };
+
+    if (attemptedChannelIds.size > 1) {
       logRequest(requestId, 'attempting fallback upstream', {
-        fallbackName: endpoint.name,
-        fallbackUrl: endpoint.url,
-        attempt: index,
-        totalFallbacks: getConfig().fallbackEndpoints.length,
+        fallbackName: channel.name,
+        fallbackUrl: channel.responsesUrl,
+        attempt: attemptedChannelIds.size - 1,
+        totalFallbacks: Math.max(0, route.channelIds.length - 1),
         fallbackAttemptsUsed: budget.attemptsUsed,
-        fallbackBudgetRemainingMs: getConfig().maxFallbackTotalMs > 0 ? Math.max(0, getConfig().maxFallbackTotalMs - (Date.now() - budget.startedAt)) : null,
-        endpointHealth: getEndpointHealthSnapshot(endpoint),
+        fallbackBudgetRemainingMs: config.maxFallbackTotalMs > 0 ? Math.max(0, config.maxFallbackTotalMs - (Date.now() - budget.startedAt)) : null,
       });
     }
 
     let response: Response;
     try {
       response = await fetchWithTimeout(
-        endpoint.url,
+        channel.responsesUrl,
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${endpoint.apiKey}`,
+            Authorization: `Bearer ${channel.apiKey}`,
             'Content-Type': 'application/json',
             Accept: 'application/json, text/event-stream',
+            ...(budget.betaFeaturesHeader === undefined
+              ? {}
+              : { 'x-codex-beta-features': budget.betaFeaturesHeader }),
           },
           body: JSON.stringify(upstreamBody),
         },
@@ -1626,72 +1611,55 @@ async function fetchResponsesUpstream(
         isAbortErrorLike(error, abortReason) && abortReason?.kind === 'timeout' && abortReason.phase === 'connect'
           ? abortReason
           : undefined;
-      linkedController.dispose();
-      releaseEndpointProbe(endpoint);
-      attemptedIndices.add(index);
-
-      const nextIndex =
-        connectTimeoutAbortReason &&
-        canContinueSearchingUpstreams(parentSignal, budget, attemptedIndices, boundedStartIndex, endpoints)
-          ? findNextAvailableEndpointIndex(requestId, endpoints, boundedStartIndex, index + 1, attemptedIndices)
-          : undefined;
-      const connectErrorNextIndex =
-        !connectTimeoutAbortReason &&
-        !isAbortErrorLike(error, abortReason) &&
-        canContinueSearchingUpstreams(parentSignal, budget, attemptedIndices, boundedStartIndex, endpoints)
-          ? findNextAvailableEndpointIndex(requestId, endpoints, boundedStartIndex, index + 1, attemptedIndices)
-          : undefined;
       const connectTimeoutPhase = connectTimeoutAbortReason?.phase;
+      const fallbackReason: FallbackReason = connectTimeoutAbortReason ? 'headers_only_timeout' : 'connect_error';
+      reportFailure({
+        error,
+        abortReason,
+        fallbackReason,
+        upstreamResponseObserved: false,
+      });
+      const canContinue = canFallbackWithinBudget(parentSignal, route, budget);
 
-      if (nextIndex !== undefined && connectTimeoutPhase) {
+      if (connectTimeoutPhase && canContinue) {
         budget.attemptsUsed += 1;
-        recordFallbackReason('headers_only_timeout', endpoint.name);
-        markEndpointFailure(endpoint, 'connect_timeout', requestId, { phase: connectTimeoutPhase });
+        recordFallbackReason('headers_only_timeout', channel.name);
         logRequest(requestId, 'upstream connect timeout encountered, falling back', {
-          upstreamName: endpoint.name,
-          upstreamUrl: endpoint.url,
+          upstreamName: channel.name,
+          channelUrl: channel.responsesUrl,
           phase: connectTimeoutPhase,
-          nextFallbackName: endpoints[nextIndex]?.name ?? null,
+          nextFallbackName: nextChannelName(),
         });
-        searchStartIndex = nextIndex;
+        dispose();
         continue;
       }
 
-      if (connectErrorNextIndex !== undefined) {
+      if (!connectTimeoutAbortReason && !isAbortErrorLike(error, abortReason) && canContinue) {
         budget.attemptsUsed += 1;
-        recordFallbackReason('connect_error', endpoint.name);
-        markEndpointFailure(endpoint, 'connect_error', requestId, {
-          errorName: error instanceof Error ? error.name : undefined,
-          errorMessage: error instanceof Error ? error.message : String(error),
-          causeCode: typeof (error as { cause?: { code?: unknown } })?.cause?.code === 'string'
-            ? (error as { cause: { code: string } }).cause.code
-            : undefined,
-        });
+        recordFallbackReason('connect_error', channel.name);
         logRequest(requestId, 'upstream connect error encountered, falling back', {
-          upstreamName: endpoint.name,
-          upstreamUrl: endpoint.url,
+          upstreamName: channel.name,
+          channelUrl: channel.responsesUrl,
           errorName: error instanceof Error ? error.name : undefined,
           errorMessage: error instanceof Error ? error.message : String(error),
           causeCode: typeof (error as { cause?: { code?: unknown } })?.cause?.code === 'string'
             ? (error as { cause: { code: string } }).cause.code
             : undefined,
-          nextFallbackName: endpoints[connectErrorNextIndex]?.name ?? null,
+          nextFallbackName: nextChannelName(),
         });
-        searchStartIndex = connectErrorNextIndex;
+        dispose();
         continue;
       }
 
-      if (connectTimeoutAbortReason) {
-        markEndpointFailure(endpoint, 'connect_timeout', requestId, { phase: connectTimeoutAbortReason.phase });
-      }
-
-      throw attachEndpointToError(error, endpoint, abortReason);
+      dispose();
+      throw attachChannelToError(error, channel, abortReason);
     }
 
-    if (index > 0 && response.ok) {
+    usageAttempt.row.status = response.status;
+    if (attemptedChannelIds.size > 1 && response.ok) {
       logRequest(requestId, 'fallback upstream succeeded', {
-        fallbackName: endpoint.name,
-        fallbackUrl: endpoint.url,
+        fallbackName: channel.name,
+        fallbackUrl: channel.responsesUrl,
         upstreamStatus: response.status,
         upstreamContentType: response.headers.get('content-type') ?? null,
       });
@@ -1699,14 +1667,14 @@ async function fetchResponsesUpstream(
 
     if (response.ok) {
       return {
-        endpoint,
-        endpointIndex: index,
+        channel,
+        channelIndex,
+        lease,
         response,
         controller: linkedController.controller,
-        dispose: () => {
-          releaseEndpointProbe(endpoint);
-          linkedController.dispose();
-        },
+        dispose,
+        reportSuccess,
+        reportFailure,
       };
     }
 
@@ -1722,79 +1690,75 @@ async function fetchResponsesUpstream(
       errorPreview = error instanceof Error ? error.message : String(error);
     }
 
-    attemptedIndices.add(index);
-    const nextIndex = canContinueSearchingUpstreams(parentSignal, budget, attemptedIndices, boundedStartIndex, endpoints)
-      ? findNextAvailableEndpointIndex(requestId, endpoints, boundedStartIndex, index + 1, attemptedIndices)
-      : undefined;
+    const fallbackReason = isQuotaExhaustedEvidence({ status: response.status, payload: parsedErrorPayload, upstreamResponseObserved: true }) ? 'compat_4xx' : getUpstreamFallbackReason(response.status, parsedErrorPayload, {
+      fallbackOnRetryable4xx: config.fallbackOnRetryable4xx,
+      fallbackOnCompat4xx: config.fallbackOnCompat4xx,
+      compatFallbackPatterns: config.compatFallbackPatterns,
+      clientErrorPatterns: config.clientErrorPatterns,
+    });
 
-    const fallbackReason = getUpstreamFallbackReason(response.status, parsedErrorPayload, {
-      fallbackOnRetryable4xx: getConfig().fallbackOnRetryable4xx,
-      fallbackOnCompat4xx: getConfig().fallbackOnCompat4xx,
-      compatFallbackPatterns: getConfig().compatFallbackPatterns,
-      clientErrorPatterns: getConfig().clientErrorPatterns,
+    if (isJsonRecord(parsedErrorPayload)) extractUsageFromStreamPayload(parsedErrorPayload, upstreamBody);
+
+    reportFailure({
+      status: response.status,
+      payload: parsedErrorPayload,
+      fallbackReason,
+      upstreamResponseObserved: true,
     });
 
     if (!fallbackReason) {
       logRequest(requestId, 'upstream error did not match fallback policy', {
-        upstreamName: endpoint.name,
-        upstreamUrl: endpoint.url,
+        upstreamName: channel.name,
+        channelUrl: channel.responsesUrl,
         upstreamStatus: response.status,
         upstreamContentType,
         errorPreview,
-        fallbackOnRetryable4xx: getConfig().fallbackOnRetryable4xx,
-        fallbackOnCompat4xx: getConfig().fallbackOnCompat4xx,
+        fallbackOnRetryable4xx: config.fallbackOnRetryable4xx,
+        fallbackOnCompat4xx: config.fallbackOnCompat4xx,
       });
       return {
-        endpoint,
-        endpointIndex: index,
+        channel,
+        channelIndex,
+        lease,
         response,
         controller: linkedController.controller,
-        dispose: () => {
-          releaseEndpointProbe(endpoint);
-          linkedController.dispose();
-        },
+        dispose,
+        reportSuccess,
+        reportFailure,
       };
     }
 
-    if (nextIndex !== undefined) {
+    const canFallback = canFallbackWithinBudget(parentSignal, route, budget);
+    if (canFallback) {
       budget.attemptsUsed += 1;
     }
     logRequest(requestId, 'upstream error matched fallback policy', {
-      upstreamName: endpoint.name,
-      upstreamUrl: endpoint.url,
+      upstreamName: channel.name,
+      channelUrl: channel.responsesUrl,
       upstreamStatus: response.status,
       upstreamContentType,
       errorPreview,
       fallbackReason,
-      nextFallbackName: nextIndex !== undefined ? endpoints[nextIndex]?.name ?? null : null,
+      nextFallbackName: nextChannelName(),
     });
 
-    recordFallbackReason(fallbackReason, endpoint.name);
-    markEndpointFailure(endpoint, fallbackReason, requestId, {
-      upstreamStatus: response.status,
-      upstreamContentType,
-    });
-
-    if (nextIndex === undefined) {
+    recordFallbackReason(fallbackReason, channel.name);
+    if (!canFallback) {
       return {
-        endpoint,
-        endpointIndex: index,
+        channel,
+        channelIndex,
+        lease,
         response,
         controller: linkedController.controller,
-        dispose: () => {
-          releaseEndpointProbe(endpoint);
-          linkedController.dispose();
-        },
+        dispose,
+        reportSuccess,
+        reportFailure,
       };
     }
 
     await closeResponseBody(response);
-    releaseEndpointProbe(endpoint);
-    linkedController.dispose();
-    searchStartIndex = nextIndex;
+    dispose();
   }
-
-  throw new Error('No upstream endpoint configured');
 }
 
 async function readResponseText(
@@ -1892,7 +1856,7 @@ async function probeAndPipeResponsesTextStream(
   let wroteTextContent = false;
   let wroteToolCall = false;
   let textCharCount = 0;
-  const enforceFirstTextTimeout = getConfig().firstTextTimeoutMs > 0;
+  const enforceFirstTextTimeout = !isV2CompactionRequest(requestBody) && getConfig().firstTextTimeoutMs > 0;
 
   const ensureSseHeaders = () => {
     if (res.headersSent) {
@@ -1910,10 +1874,17 @@ async function probeAndPipeResponsesTextStream(
   };
 
   const writeSseEvent = (event: { event: string; data: string }) => {
+    wroteAnyEvent = true;
+    const chunk = formatSseEvent(event);
+    if (streamMode === 'normalized' && !wroteTextContent && !wroteToolCall) {
+      pendingClientEvents.push(chunk);
+      return;
+    }
     ensureSseHeaders();
     startedStreaming = true;
-    wroteAnyEvent = true;
-    res.write(formatSseEvent(event));
+    for (const pendingChunk of pendingClientEvents) res.write(pendingChunk);
+    pendingClientEvents.length = 0;
+    res.write(chunk);
   };
 
   const resetStreamTimer = (phase: 'first-byte' | 'idle') => {
@@ -1951,36 +1922,45 @@ async function probeAndPipeResponsesTextStream(
       const separatorLength = separatorMatch ? separatorMatch[0].length : 2;
       pending = pending.slice(separatorIndex + separatorLength);
 
-      if (block.trim()) {
-        const parsedEvent = parseSseChunk(block);
-        let normalizedEvent = parsedEvent;
+        if (block.trim() && !isCommentOnlySseChunk(block)) {
+          const parsedEvent = parseSseChunk(block);
+          let normalizedEvent = parsedEvent;
+          let isKeepAliveEvent = false;
 
-        if (parsedEvent.data) {
-          const parsedPayload = parseStreamPayload(parsedEvent.data);
-          if (parsedPayload !== undefined) {
-            usage = extractUsageFromStreamPayload(parsedPayload, requestBody) ?? usage;
-            const textLength = extractTextLengthFromResponsesPayload(parsedPayload);
-            textCharCount += textLength;
-            if (textLength > 0) {
-              wroteTextContent = true;
-              clearFirstTextTimer();
+          if (parsedEvent.data) {
+            try {
+              const parsedPayload = JSON.parse(parsedEvent.data);
+              observeUpstreamFailure(controller, parsedPayload, upstreamResponse.status);
+              isKeepAliveEvent = isKeepAliveStreamPayload(parsedPayload);
+              if (!isKeepAliveEvent) {
+                usage = extractUsageFromStreamPayload(parsedPayload, requestBody) ?? usage;
+                const textLength = extractTextLengthFromResponsesPayload(parsedPayload);
+                textCharCount += textLength;
+                if (textLength > 0) {
+                  wroteTextContent = true;
+                  clearFirstTextTimer();
+                }
+                if (payloadHasToolCall(parsedPayload)) {
+                  wroteToolCall = true;
+                  clearFirstTextTimer();
+                }
+                normalizedEvent = {
+                  event: parsedEvent.event,
+                  data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
+                };
+              }
+            } catch {
+              normalizedEvent = parsedEvent;
             }
-            if (payloadHasToolCall(parsedPayload)) {
-              wroteToolCall = true;
-              clearFirstTextTimer();
-            }
-            normalizedEvent = {
-              event: parsedEvent.event,
-              data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
-            };
           }
-        }
 
-        writeSseEvent(streamMode === 'normalized' ? normalizedEvent : parsedEvent);
-        streamEventCount += 1;
-      } else if (startedStreaming) {
-        res.write('\n');
-      }
+          if (!isKeepAliveEvent) {
+            writeSseEvent(streamMode === 'normalized' ? normalizedEvent : parsedEvent);
+            streamEventCount += 1;
+          }
+        } else if (startedStreaming) {
+          res.write('\n');
+        }
 
       separatorIndex = pending.search(/\r?\n\r?\n/);
     }
@@ -2026,6 +2006,7 @@ async function probeAndPipeResponsesTextStream(
       }
 
       flushPendingBlocks();
+      if (upstreamFailures.has(controller)) { await reader.cancel(); break; }
     }
   } catch (error) {
     if (controller.signal.aborted) {
@@ -2098,13 +2079,18 @@ async function probeAndPipeResponsesTextStream(
 
     if (detectedResponsesStream) {
       flushPendingBlocks();
-      if (pending.trim()) {
+      if (pending.trim() && !isCommentOnlySseChunk(pending)) {
         const parsedEvent = parseSseChunk(pending);
         let normalizedEvent = parsedEvent;
+        let isKeepAliveTail = false;
 
+        if (streamMode === 'raw' && parsedEvent.data) extractUsageFromStreamPayload(parseStreamPayload(parsedEvent.data), requestBody);
         if (streamMode === 'normalized' && parsedEvent.data) {
           const parsedPayload = parseStreamPayload(parsedEvent.data);
-          if (parsedPayload !== undefined) {
+          observeUpstreamFailure(controller, parsedPayload, upstreamResponse.status);
+          if (isKeepAliveStreamPayload(parsedPayload)) {
+            isKeepAliveTail = true;
+          } else if (parsedPayload !== undefined) {
             usage = extractUsageFromStreamPayload(parsedPayload, requestBody) ?? usage;
             if (payloadHasToolCall(parsedPayload)) {
               wroteToolCall = true;
@@ -2116,8 +2102,10 @@ async function probeAndPipeResponsesTextStream(
           }
         }
 
-        writeSseEvent(streamMode === 'normalized' ? normalizedEvent : parsedEvent);
-        streamEventCount += 1;
+        if (!isKeepAliveTail) {
+          writeSseEvent(streamMode === 'normalized' ? normalizedEvent : parsedEvent);
+          streamEventCount += 1;
+        }
       }
     }
 
@@ -2125,7 +2113,7 @@ async function probeAndPipeResponsesTextStream(
   }
 
   if (detectedResponsesStream) {
-    if (!res.writableEnded && !res.destroyed) {
+    if (startedStreaming && !res.writableEnded && !res.destroyed) {
       res.end();
     }
 
@@ -2135,7 +2123,7 @@ async function probeAndPipeResponsesTextStream(
 
     const effectiveWroteText = wroteTextContent || wroteToolCall;
 
-    if (!effectiveWroteText && !usage) {
+    if (!effectiveWroteText || upstreamFailures.has(controller)) {
       return {
         kind: 'completed',
         chunkCount,
@@ -2145,21 +2133,7 @@ async function probeAndPipeResponsesTextStream(
         wroteAnyEvent,
         wroteTextContent: effectiveWroteText,
         textCharCount,
-        fallbackReason: 'stream_no_text_content',
-      };
-    }
-
-    if (effectiveWroteText && !usage) {
-      return {
-        kind: 'completed',
-        chunkCount,
-        totalBytes,
-        usage,
-        startedStreaming,
-        wroteAnyEvent,
-        wroteTextContent: effectiveWroteText,
-        textCharCount,
-        fallbackReason: 'stream_missing_usage',
+        fallbackReason: upstreamFailures.has(controller) ? 'unknown_upstream_error' : 'stream_no_text_content',
       };
     }
 
@@ -2235,8 +2209,6 @@ async function pipeUpstreamSse(
   };
 
   if (!upstreamResponse.body) {
-    ensureSseHeaders();
-    res.end();
     return {
       kind: 'completed',
       chunkCount: 0,
@@ -2259,7 +2231,8 @@ async function pipeUpstreamSse(
   let streamEventCount = 0;
   let streamTimer: ReturnType<typeof setTimeout> | undefined;
   let firstTextTimer: ReturnType<typeof setTimeout> | undefined;
-  const enforceFirstTextTimeout = getConfig().firstTextTimeoutMs > 0 && streamMode === 'normalized';
+  const enforceFirstTextTimeout =
+    !isV2CompactionRequest(requestBody) && getConfig().firstTextTimeoutMs > 0 && streamMode === 'normalized';
 
   const resetStreamTimer = (phase: 'first-byte' | 'idle') => {
     if (streamTimer) {
@@ -2310,6 +2283,15 @@ async function pipeUpstreamSse(
 
       if (streamMode === 'raw') {
         writeSseChunk(Buffer.from(value));
+        pending += textChunk;
+        let boundary = pending.search(/\r?\n\r?\n/);
+        while (boundary !== -1) {
+          const event = parseSseChunk(pending.slice(0, boundary));
+          observeUpstreamFailure(controller, parseStreamPayload(event.data), upstreamResponse.status);
+          pending = pending.slice(boundary).replace(/^\r?\n\r?\n/, '');
+          boundary = pending.search(/\r?\n\r?\n/);
+        }
+        if (upstreamFailures.has(controller)) { await reader.cancel(); break; }
         continue;
       }
 
@@ -2322,42 +2304,49 @@ async function pipeUpstreamSse(
         const separatorLength = separatorMatch ? separatorMatch[0].length : 2;
         pending = pending.slice(separatorIndex + separatorLength);
 
-        if (block.trim()) {
+        if (block.trim() && !isCommentOnlySseChunk(block)) {
           const parsedEvent = parseSseChunk(block);
           let normalizedEvent = parsedEvent;
+          let isKeepAliveEvent = false;
 
           if (parsedEvent.data) {
             try {
               const parsedPayload = JSON.parse(parsedEvent.data);
-              usage = extractUsageFromStreamPayload(parsedPayload, requestBody) ?? usage;
-              const textLength = extractTextLengthFromResponsesPayload(parsedPayload);
-              textCharCount += textLength;
-              if (textLength > 0) {
-                wroteTextContent = true;
-                clearFirstTextTimer();
+              observeUpstreamFailure(controller, parsedPayload, upstreamResponse.status);
+              isKeepAliveEvent = isKeepAliveStreamPayload(parsedPayload);
+              if (!isKeepAliveEvent) {
+                usage = extractUsageFromStreamPayload(parsedPayload, requestBody) ?? usage;
+                const textLength = extractTextLengthFromResponsesPayload(parsedPayload);
+                textCharCount += textLength;
+                if (textLength > 0) {
+                  wroteTextContent = true;
+                  clearFirstTextTimer();
+                }
+                if (payloadHasToolCall(parsedPayload)) {
+                  wroteToolCall = true;
+                  clearFirstTextTimer();
+                }
+                normalizedEvent = {
+                  event: parsedEvent.event,
+                  data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
+                };
               }
-              if (payloadHasToolCall(parsedPayload)) {
-                wroteToolCall = true;
-                clearFirstTextTimer();
-              }
-              normalizedEvent = {
-                event: parsedEvent.event,
-                data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
-              };
             } catch {
               normalizedEvent = parsedEvent;
             }
           }
 
-          const formattedEvent = formatSseEvent(normalizedEvent);
-          if (wroteTextContent || wroteToolCall) {
-            flushPendingClientEvents();
-            writeSseChunk(formattedEvent);
-          } else {
-            pendingClientEvents.push(formattedEvent);
+          if (!isKeepAliveEvent) {
+            const formattedEvent = formatSseEvent(normalizedEvent);
+            if (wroteTextContent || wroteToolCall) {
+              flushPendingClientEvents();
+              writeSseChunk(formattedEvent);
+            } else {
+              pendingClientEvents.push(formattedEvent);
+            }
+            wroteAnyEvent = true;
+            streamEventCount += 1;
           }
-          wroteAnyEvent = true;
-          streamEventCount += 1;
         } else {
           if (wroteTextContent || wroteToolCall) {
             flushPendingClientEvents();
@@ -2369,6 +2358,7 @@ async function pipeUpstreamSse(
 
         separatorIndex = pending.search(/\r?\n\r?\n/);
       }
+      if (upstreamFailures.has(controller)) { await reader.cancel(); break; }
     }
   } catch (error) {
     if (controller.signal.aborted) {
@@ -2440,42 +2430,56 @@ async function pipeUpstreamSse(
 
     if (streamMode === 'normalized' && !controller.signal.aborted) {
       pending += finalChunk;
-      if (pending.trim()) {
+      if (pending.trim() && !isCommentOnlySseChunk(pending)) {
         const parsedEvent = parseSseChunk(pending);
         let normalizedEvent = parsedEvent;
+        let isKeepAliveTail = false;
 
         if (parsedEvent.data) {
           try {
             const parsedPayload = JSON.parse(parsedEvent.data);
-            const textLength = extractTextLengthFromResponsesPayload(parsedPayload);
-            textCharCount += textLength;
-            if (textLength > 0) {
-              wroteTextContent = true;
+            observeUpstreamFailure(controller, parsedPayload, upstreamResponse.status);
+            if (isKeepAliveStreamPayload(parsedPayload)) {
+              isKeepAliveTail = true;
+            } else {
+              const textLength = extractTextLengthFromResponsesPayload(parsedPayload);
+              textCharCount += textLength;
+              if (textLength > 0) {
+                wroteTextContent = true;
+              }
+              if (payloadHasToolCall(parsedPayload)) {
+                wroteToolCall = true;
+              }
+              normalizedEvent = {
+                event: parsedEvent.event,
+                data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
+              };
             }
-            if (payloadHasToolCall(parsedPayload)) {
-              wroteToolCall = true;
-            }
-            normalizedEvent = {
-              event: parsedEvent.event,
-              data: JSON.stringify(normalizeStreamEventPayload(parsedPayload, requestBody)),
-            };
           } catch {
             normalizedEvent = parsedEvent;
           }
         }
 
-        const formattedEvent = formatSseEvent(normalizedEvent);
-        if (wroteTextContent || wroteToolCall) {
-          flushPendingClientEvents();
-          writeSseChunk(formattedEvent);
-        } else {
-          pendingClientEvents.push(formattedEvent);
+        if (!isKeepAliveTail) {
+          const formattedEvent = formatSseEvent(normalizedEvent);
+          if (wroteTextContent || wroteToolCall) {
+            flushPendingClientEvents();
+            writeSseChunk(formattedEvent);
+          } else {
+            pendingClientEvents.push(formattedEvent);
+          }
         }
       }
     }
 
+    const events = parseSse(collectedText);
+    // Observe reported usage even when a raw stream later disconnects or times out.
+    for (const event of events) {
+      const payload = parseStreamPayload(event.data);
+      extractUsageFromStreamPayload(payload, requestBody);
+      observeUpstreamFailure(controller, payload, upstreamResponse.status);
+    }
     if (!controller.signal.aborted) {
-      const events = parseSse(collectedText);
       logSseDebug(requestId, events);
       const responseObject = synthesizeResponseFromEvents(events);
       if (responseObject) {
@@ -2563,17 +2567,16 @@ async function pipeUpstreamSse(
     wroteAnyEvent,
     wroteTextContent: effectiveWroteText,
     textCharCount,
-    fallbackReason: !effectiveWroteText ? 'stream_no_text_content' : !usage ? 'stream_missing_usage' : undefined,
+    fallbackReason: upstreamFailures.has(controller) ? 'unknown_upstream_error' : !effectiveWroteText ? 'stream_no_text_content' : undefined,
   };
 }
 
 const server = createServer((req, res) => {
   const _snap = runtimeStore.getSnapshot();
-  _requestContext.run(_snap, async () => {
+  usageContext.run({ requestId: randomUUID(), write: row => _usageStore.write(row) }, () => _requestContext.run(_snap, async () => {
   const runtimeVersion = _snap.runtimeVersion;
 
   const {
-    apiKey,
     clientErrorPatterns,
     compatFallbackPatterns,
     clearDeveloperContent,
@@ -2582,12 +2585,9 @@ const server = createServer((req, res) => {
     clearSystemContent,
     convertSystemToDeveloper,
     debugSse,
-    defaultModel,
     defaultPromptCacheKey,
     defaultPromptCacheRetention,
     defaultStreamMode,
-    fallbackConfigPath,
-    fallbackEndpoints,
     fallbackOnCompat4xx,
     fallbackOnRetryable4xx,
     firstByteTimeoutMs,
@@ -2598,20 +2598,11 @@ const server = createServer((req, res) => {
     maxCachedResponses,
     maxConcurrentRequests,
     logRequestBodies,
-    maxFallbackAttempts,
     maxFallbackTotalMs,
-    modelMappingPath,
-    modelMappings,
-    endpointAuthCooldownMs,
-    endpointFailureThreshold,
-    endpointHalfOpenMaxProbes,
-    endpointInvalidResponseCooldownMs,
-    endpointTimeoutCooldownMs,
     overrideInstructionsText,
     port,
-    primaryEndpoint,
-    primaryProviderName,
-    responsesEndpoints,
+    routingConfig,
+    routingConfigPath,
     sseFailureDebugDir,
     sseFailureDebugEnabled,
     streamIdleTimeoutMs,
@@ -2619,18 +2610,19 @@ const server = createServer((req, res) => {
     streamMissingUsageDebugEnabled,
     nonStreamingRequestTimeoutMs,
     totalRequestTimeoutMs,
-    upstreamModelsUrl,
     upstreamTimeoutMs,
-    upstreamUrl,
   } = _snap.config;
 
   const requestId = createRequestId();
   const startedAt = Date.now();
   let countedAsActive = false;
   const upstreamController = new AbortController();
-  const totalTimeout = setTimeout(() => {
-    abortWithReason(upstreamController, { kind: 'timeout', phase: 'total' });
-  }, totalRequestTimeoutMs);
+  const requestTotalTimeoutMs = req.url === '/v1/responses/compact' ? 0 : totalRequestTimeoutMs;
+  const totalTimeout = requestTotalTimeoutMs > 0
+    ? setTimeout(() => {
+      abortWithReason(upstreamController, { kind: 'timeout', phase: 'total' });
+    }, requestTotalTimeoutMs)
+    : undefined;
 
   const handleRequestAborted = () => {
     abortWithReason(upstreamController, { kind: 'client_disconnect', source: 'request' });
@@ -2645,6 +2637,16 @@ const server = createServer((req, res) => {
   res.on('close', handleResponseClosed);
 
   const finish = (statusCode: number, note: string, extra?: Record<string, unknown>) => {
+    if (statusCode >= 400) usageContext.getStore()?.current?.result(statusCode === 499 ? 'cancelled' : 'failed', note);
+    if (
+      compactV2Request &&
+      !compactV2FallbackRecorded &&
+      compactV2AttemptedChannelIds !== undefined &&
+      compactV2AttemptedChannelIds.size > 1
+    ) {
+      proxyStats.compactV2Fallbacks += 1;
+      compactV2FallbackRecorded = true;
+    }
     recordStatus(statusCode);
     logRequest(requestId, note, {
       statusCode,
@@ -2654,7 +2656,11 @@ const server = createServer((req, res) => {
       ...extra,
     });
   };
-  let selectedEndpoint = primaryEndpoint;
+  let compactV2Request = false;
+  let compactV2FallbackRecorded = false;
+  let compactV2AttemptedChannelIds: ReadonlySet<string> | undefined;
+  let selectedChannel: ChannelConfig | undefined;
+  let selectedChannelForLog: ChannelConfig | undefined;
 
   try {
     if (!req.url) {
@@ -2687,11 +2693,9 @@ const server = createServer((req, res) => {
       sendJson(res, 200, {
         ok: true,
         instanceName,
-        primaryProviderName,
-        upstreamUrl,
-        upstreamModelsUrl,
-        fallbackConfigPath,
-        modelMappingPath,
+        routingConfigPath,
+        configuredModelCount: routingConfig.modelRoutes.size,
+        configuredChannelCount: routingConfig.channelsById.size,
         port,
         host,
         activeRequests,
@@ -2710,7 +2714,6 @@ const server = createServer((req, res) => {
         defaultPromptCacheKey,
         defaultPromptCacheRetention,
         claudeBillingHeaderMode,
-        modelMappings,
         overrideInstructionsText,
         logRequestBodies,
         forceStoreFalse,
@@ -2739,95 +2742,29 @@ const server = createServer((req, res) => {
     }
 
     if (req.method === 'GET' && req.url === '/v1/models') {
-      logRequest(requestId, 'forwarding models request');
-
-      let upstreamResponse: Response;
-      try {
-        upstreamResponse = await fetchWithTimeout(upstreamModelsUrl, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            Accept: 'application/json',
-          },
-        }, upstreamController);
-      } catch (error) {
-        const abortReason = getAbortReason(upstreamController.signal);
-        if (error instanceof Error && error.name === 'AbortError' && abortReason?.kind === 'timeout') {
-          sendJson(
-            res,
-            504,
-            makeError(createTimeoutMessage(abortReason.phase), 504).body,
-          );
-          finish(504, 'models upstream timeout', { phase: abortReason.phase });
-          return;
-        }
-
-        if (error instanceof Error && error.name === 'AbortError' && abortReason?.kind === 'client_disconnect') {
-          finish(499, 'models request cancelled by client', { source: abortReason.source });
-          return;
-        }
-
-        throw error;
-      }
-
-      let upstreamText: string;
-      try {
-        upstreamText = await readResponseText(upstreamResponse, upstreamController);
-      } catch (error) {
-        const abortReason = getAbortReason(upstreamController.signal);
-        if (error instanceof Error && error.name === 'AbortError' && abortReason?.kind === 'timeout') {
-          sendJson(res, 504, makeError(createTimeoutMessage(abortReason.phase), 504).body);
-          finish(504, 'models response body timeout', { phase: abortReason.phase });
-          return;
-        }
-
-        if (error instanceof Error && error.name === 'AbortError' && abortReason?.kind === 'client_disconnect') {
-          finish(499, 'models response cancelled by client', { source: abortReason.source });
-          return;
-        }
-
-        throw error;
-      }
-
-      let jsonPayload: unknown;
-      try {
-        jsonPayload = JSON.parse(upstreamText);
-      } catch {
-        sendJson(
-          res,
-          502,
-          makeError('Upstream models endpoint returned invalid JSON', 502, upstreamText.slice(0, 2000)).body,
-        );
-        finish(502, 'invalid models json', { upstreamStatus: upstreamResponse.status });
-        return;
-      }
-
-      if (!upstreamResponse.ok) {
-        sendJson(res, upstreamResponse.status, normalizeErrorPayload(upstreamResponse.status, jsonPayload));
-        finish(upstreamResponse.status, 'models upstream error');
-        return;
-      }
-
-      const mappedModelsPayload = applyModelMappingsToModelsPayload(jsonPayload);
-      sendJson(res, 200, mappedModelsPayload.payload as JsonValue);
-      finish(200, 'models json returned', {
-        upstreamStatus: upstreamResponse.status,
-        aliasCount: mappedModelsPayload.aliasCount,
-      });
+      const payload = buildConfiguredModelsResponse(routingConfig);
+      sendJson(res, 200, payload as JsonValue);
+      finish(200, 'models config-derived returned');
       return;
     }
 
-    if (req.method !== 'POST' || req.url !== '/v1/responses') {
+    const isCompactRequest = req.method === 'POST' && req.url === '/v1/responses/compact';
+    const isResponsesRequest = req.method === 'POST' && req.url === '/v1/responses';
+    if (!isCompactRequest && !isResponsesRequest) {
       sendJson(
         res,
         404,
-        makeError('Supported routes: GET /healthz, GET /admin/config, POST /admin/config/validate, PUT /admin/config, POST /admin/config/reload, POST /admin/config/rollback, GET /admin/stats, GET /v1/models, GET /v1/responses/:id, POST /admin/cache/clear, POST /v1/responses', 404).body,
+        makeError('Supported routes: GET /healthz, GET /admin/config, POST /admin/config/validate, PUT /admin/config, POST /admin/config/reload, POST /admin/config/rollback, GET /admin/stats, GET /admin/compact/detection, POST /admin/compact/detect, GET /v1/models, GET /v1/responses/:id, POST /admin/cache/clear, POST /v1/responses, POST /v1/responses/compact', 404).body,
       );
       finish(404, 'unsupported route', { method: req.method, url: req.url });
       return;
     }
 
-    proxyStats.requestsTotal += 1;
+    if (isCompactRequest) {
+      proxyStats.compactRequestsTotal += 1;
+    } else {
+      proxyStats.requestsTotal += 1;
+    }
 
     if (activeRequests >= maxConcurrentRequests) {
       proxyStats.overloadRejects += 1;
@@ -2862,12 +2799,100 @@ const server = createServer((req, res) => {
       return;
     }
 
+    if (isCompactRequest) {
+      if (routingConfig.compactRoute === undefined) {
+        sendJson(res, 501, makeError('compact route not configured', 501).body);
+        finish(501, 'compact route not configured');
+        return;
+      }
+
+      const compactResult = await _compactProxy(requestBody, upstreamController.signal);
+      if ('attempts' in compactResult && compactResult.attempts > 1) {
+        proxyStats.compactFallbacks += 1;
+      }
+
+      switch (compactResult.kind) {
+        case 'all_unavailable': {
+          const retryAfterMs = Math.max(1, compactResult.retryAfterMs);
+          res.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+          sendJson(res, 503, makeError('compact_channels_unavailable', 503, { retryAfterMs }).body);
+          finish(503, 'compact channels unavailable', { retryAfterMs });
+          return;
+        }
+        case 'client_disconnect':
+          finish(499, 'compact request cancelled by client', { source: compactResult.source });
+          return;
+        case 'fallback_exhausted':
+          sendJson(
+            res,
+            compactResult.status,
+            makeError('No upstream endpoint produced a usable response before fallback was exhausted', compactResult.status, compactResult.details).body,
+          );
+          finish(compactResult.status, 'compact fallback exhausted', compactResult.details);
+          return;
+        case 'upstream_error':
+          sendJson(res, compactResult.status, compactResult.body);
+          finish(compactResult.status, 'compact upstream error', {
+            upstreamName: compactResult.channel.name,
+            upstreamStatus: compactResult.status,
+            attempts: compactResult.attempts,
+          });
+          return;
+        case 'success':
+          addUsageToStats(compactResult.usage);
+          sendJson(res, compactResult.status, compactResult.body);
+          finish(compactResult.status, 'compact response returned', {
+            upstreamName: compactResult.channel.name,
+            upstreamStatus: compactResult.status,
+            attempts: compactResult.attempts,
+            usage: compactResult.usage,
+          });
+          return;
+        default:
+          return assertNeverCompactResult(compactResult);
+      }
+    }
+
     const streamResponse = wantsStreaming(req, requestBody);
     const streamMode = getStreamMode(req, requestBody);
     logRequestAccepted(requestId, req, streamResponse, streamMode);
     const responsesConnectTimeoutMs = getResponsesConnectTimeoutMs(streamResponse);
     const responsesFirstByteTimeoutMs = getResponsesFirstByteTimeoutMs(streamResponse);
-    const upstreamBody = normalizeRequestBody(requestBody, streamResponse);
+    const modelResolution = resolveModelRoute(requestBody.model, routingConfig);
+    if ('code' in modelResolution) {
+      sendJson(res, 400, makeError(`Model not configured: ${modelResolution.requestedModel}`, 400).body);
+      finish(400, 'model not configured', { requestedModel: modelResolution.requestedModel });
+      return;
+    }
+
+    compactV2Request = isV2CompactionRequest(requestBody);
+    if (compactV2Request) {
+      proxyStats.compactV2RequestsTotal += 1;
+    }
+    const compactV2ChannelIds = routingConfig.compactRoute?.v2ChannelIds ?? [];
+    const usesCompactV2Route = compactV2Request && compactV2ChannelIds.length > 0;
+    const upstreamRoute: ResolvedModelRoute = usesCompactV2Route
+      ? {
+        requestedModel: modelResolution.requestedModel,
+        canonicalModel: compactV2HealthKey(modelResolution.canonicalModel),
+        channelIds: compactV2ChannelIds,
+      }
+      : modelResolution;
+    const clientBetaFeatures = req.headers['x-codex-beta-features'];
+    const betaFeaturesHeader = compactV2Request
+      ? Array.isArray(clientBetaFeatures)
+        ? clientBetaFeatures.join(', ')
+        : clientBetaFeatures ?? 'remote_compaction_v2'
+      : undefined;
+
+    const upstreamBody = normalizeRequestBody(requestBody, streamResponse, modelResolution.canonicalModel);
+    const channels = upstreamRoute.channelIds.flatMap(channelId => {
+      const channel = routingConfig.channelsById.get(channelId);
+      return channel === undefined ? [] : [channel];
+    });
+    const routeChannels = channels;
+    selectedChannelForLog = channels[0];
+    selectedChannel = selectedChannelForLog;
     logRequestBodiesPreview(requestId, requestBody, upstreamBody);
     logForwardingUpstream(
       requestId,
@@ -2883,22 +2908,50 @@ const server = createServer((req, res) => {
     const fallbackBudget: FallbackBudget = {
       startedAt: Date.now(),
       attemptsUsed: 0,
+      ...createChannelAttempts(getConfig().channelMaxAttempts),
+      route: upstreamRoute,
+      rememberChannel: trackCacheKey(upstreamBody.prompt_cache_key, upstreamRoute.canonicalModel),
+      ...(betaFeaturesHeader === undefined ? {} : { betaFeaturesHeader }),
     };
+    compactV2AttemptedChannelIds = fallbackBudget.attemptedChannelIds;
     try {
       upstreamAttempt = await fetchResponsesUpstream(
         requestId,
+        upstreamRoute,
         upstreamBody,
         upstreamController.signal,
         streamResponse,
         fallbackBudget,
       );
-      selectedEndpoint = upstreamAttempt.endpoint;
+      selectedChannel = upstreamAttempt.channel;
+      selectedChannelForLog = upstreamAttempt.channel;
     } catch (error) {
       const maybeAbortError = error as Error & { abortReason?: AbortReason };
       const maybeAbortObject = error as { abortReason?: AbortReason; error?: unknown };
-      const errorEndpoint = getEndpointFromError(error);
-      if (errorEndpoint) {
-        selectedEndpoint = errorEndpoint;
+      const errorChannel = getChannelFromError(error);
+      if (errorChannel) {
+        selectedChannel = errorChannel;
+        selectedChannelForLog = errorChannel;
+      }
+      if (error instanceof ModelChannelsUnavailableError) {
+        const retryAfterMs = Math.max(1, error.retryAfterMs);
+        const unavailableCode = usesCompactV2Route
+          ? 'compact_v2_channels_unavailable'
+          : 'model_channels_unavailable';
+        res.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+        if (streamResponse) {
+          sendResponsesStreamError(res, unavailableCode, {
+            statusCode: 503,
+            code: 'server_error',
+            sequenceNumber: 1,
+          });
+        } else {
+          sendJson(res, 503, makeError(unavailableCode, 503, { retryAfterMs }).body);
+        }
+        finish(503, usesCompactV2Route ? 'compact v2 channels unavailable' : 'model channels unavailable', {
+          retryAfterMs,
+        });
+        return;
       }
       const abortReason = maybeAbortError.abortReason ?? maybeAbortObject.abortReason ?? getAbortReason(upstreamController.signal);
       if (isAbortErrorLike(error, abortReason) && abortReason?.kind === 'timeout') {
@@ -2926,24 +2979,24 @@ const server = createServer((req, res) => {
             }), 504).body,
           );
         }
-        finish(504, 'upstream timeout', { phase: abortReason.phase, upstreamName: selectedEndpoint.name });
+        finish(504, 'upstream timeout', { phase: abortReason.phase, upstreamName: selectedChannelForLog.name });
         return;
       }
 
       if (isAbortErrorLike(error, abortReason) && abortReason?.kind === 'client_disconnect') {
-        finish(499, 'request cancelled by client', { source: abortReason.source, upstreamName: selectedEndpoint.name });
+        finish(499, 'request cancelled by client', { source: abortReason.source, upstreamName: selectedChannelForLog.name });
         return;
       }
 
       throw error;
     }
 
-    selectedEndpoint = upstreamAttempt.endpoint;
+    selectedChannelForLog = upstreamAttempt.channel;
 
     let bufferedUpstreamText: string | undefined;
 
     if (streamResponse) {
-      const endpoints = responsesEndpoints;
+      const endpoints = routeChannels;
       let currentAttempt = upstreamAttempt;
 
       while (true) {
@@ -2951,7 +3004,7 @@ const server = createServer((req, res) => {
 
         if (currentAttempt.response.ok && upstreamContentType.includes('text/event-stream')) {
           logRequest(requestId, 'stream passthrough started', {
-            upstreamName: currentAttempt.endpoint.name,
+            upstreamName: currentAttempt.channel.name,
             upstreamStatus: currentAttempt.response.status,
             upstreamContentType,
             streamMode,
@@ -2965,13 +3018,20 @@ const server = createServer((req, res) => {
             streamMode,
             currentAttempt.controller,
           );
+          if (streamOutcome.kind !== 'client_disconnect' && (streamOutcome.kind !== 'completed' || streamOutcome.fallbackReason)) {
+            currentAttempt.reportFailure({
+              fallbackReason: streamOutcome.fallbackReason ?? 'unknown_upstream_error',
+              abortReason: getAbortReason(currentAttempt.controller.signal),
+              upstreamResponseObserved: true,
+            });
+          }
 
           if (streamOutcome.kind === 'timeout') {
             proxyStats.upstreamTimeouts += 1;
             const canFallback = canAttemptFallbackAfterStreamOutcome(
               streamOutcome,
               upstreamController.signal,
-              currentAttempt.endpointIndex,
+              currentAttempt.channelIndex,
               endpoints,
               fallbackBudget,
             );
@@ -2979,7 +3039,7 @@ const server = createServer((req, res) => {
             if (canFallback) {
               const fallbackReason = streamOutcome.fallbackReason ?? 'headers_only_timeout';
               fallbackBudget.attemptsUsed += 1;
-              markEndpointFailure(currentAttempt.endpoint, fallbackReason, requestId, {
+              reportAttemptFailure(currentAttempt, fallbackReason, requestId, {
                 phase: streamOutcome.phase,
                 streamMode,
                 ...getStreamObservationLogFields(streamOutcome, {
@@ -2989,8 +3049,8 @@ const server = createServer((req, res) => {
               });
               logRequest(requestId, getStreamTimeoutLogMessage(streamOutcome.phase, { fallingBack: true }), {
                 phase: streamOutcome.phase,
-                upstreamName: currentAttempt.endpoint.name,
-                nextFallbackName: endpoints[currentAttempt.endpointIndex + 1]?.name ?? null,
+                upstreamName: currentAttempt.channel.name,
+                nextFallbackName: endpoints[currentAttempt.channelIndex + 1]?.name ?? null,
                 streamMode,
                 fallbackReason,
                 wroteAnyEvent: streamOutcome.wroteAnyEvent,
@@ -3001,24 +3061,25 @@ const server = createServer((req, res) => {
                   fallbackReason,
                 }),
               });
-              recordFallbackReason(fallbackReason, currentAttempt.endpoint.name);
+              recordFallbackReason(fallbackReason, currentAttempt.channel.name);
               await closeResponseBody(currentAttempt.response);
               currentAttempt.dispose();
               try {
                 currentAttempt = await fetchResponsesUpstream(
                   requestId,
-                  upstreamBody,
+                  upstreamRoute,
+                upstreamBody,
                   upstreamController.signal,
                   streamResponse,
                   fallbackBudget,
-                  currentAttempt.endpointIndex + 1,
+                  currentAttempt.channelIndex + 1,
                 );
               } catch (error) {
                 const maybeAbortError = error as Error & { abortReason?: AbortReason };
                 const maybeAbortObject = error as { abortReason?: AbortReason; error?: unknown };
-                const errorEndpoint = getEndpointFromError(error);
+                const errorEndpoint = getChannelFromError(error);
                 if (errorEndpoint) {
-                  selectedEndpoint = errorEndpoint;
+                  selectedChannelForLog = errorEndpoint;
                 }
                 const abortReason = maybeAbortError.abortReason ?? maybeAbortObject.abortReason ?? getAbortReason(upstreamController.signal);
 
@@ -3031,7 +3092,7 @@ const server = createServer((req, res) => {
                   });
                   finish(504, 'stream fallback upstream timeout', {
                     phase: abortReason.phase,
-                    upstreamName: selectedEndpoint.name,
+                    upstreamName: selectedChannelForLog.name,
                   });
                   return;
                 }
@@ -3039,14 +3100,14 @@ const server = createServer((req, res) => {
                 if (isAbortErrorLike(error, abortReason) && abortReason?.kind === 'client_disconnect') {
                   finish(499, 'stream fallback request cancelled by client', {
                     source: abortReason.source,
-                    upstreamName: selectedEndpoint.name,
+                    upstreamName: selectedChannelForLog.name,
                   });
                   return;
                 }
 
                 throw error;
               }
-              selectedEndpoint = currentAttempt.endpoint;
+              selectedChannelForLog = currentAttempt.channel;
               continue;
             }
 
@@ -3058,6 +3119,10 @@ const server = createServer((req, res) => {
               });
             }
 
+            reportAttemptFailure(currentAttempt, streamOutcome.fallbackReason ?? 'headers_only_timeout', requestId, {
+              phase: streamOutcome.phase,
+              streamMode,
+            });
             currentAttempt.dispose();
             finish(504, getStreamTimeoutLogMessage(streamOutcome.phase), {
               phase: streamOutcome.phase,
@@ -3066,7 +3131,7 @@ const server = createServer((req, res) => {
               chunkCount: streamOutcome.chunkCount,
               totalBytes: streamOutcome.totalBytes,
               streamMode,
-              upstreamName: currentAttempt.endpoint.name,
+              upstreamName: currentAttempt.channel.name,
               startedStreaming: streamOutcome.startedStreaming,
               wroteAnyEvent: streamOutcome.wroteAnyEvent,
               wroteTextContent: streamOutcome.wroteTextContent,
@@ -3088,7 +3153,7 @@ const server = createServer((req, res) => {
               chunkCount: streamOutcome.chunkCount,
               totalBytes: streamOutcome.totalBytes,
               streamMode,
-              upstreamName: currentAttempt.endpoint.name,
+              upstreamName: currentAttempt.channel.name,
             });
             return;
           }
@@ -3097,15 +3162,15 @@ const server = createServer((req, res) => {
             const canFallback = canAttemptFallbackAfterStreamOutcome(
               streamOutcome,
               upstreamController.signal,
-              currentAttempt.endpointIndex,
+              currentAttempt.channelIndex,
               endpoints,
               fallbackBudget,
             );
 
             if (canFallback && streamOutcome.fallbackReason) {
               fallbackBudget.attemptsUsed += 1;
-              recordFallbackReason(streamOutcome.fallbackReason, currentAttempt.endpoint.name);
-              markEndpointFailure(currentAttempt.endpoint, streamOutcome.fallbackReason, requestId, {
+              recordFallbackReason(streamOutcome.fallbackReason, currentAttempt.channel.name);
+              reportAttemptFailure(currentAttempt, streamOutcome.fallbackReason, requestId, {
                 streamMode,
                 error: streamOutcome.error instanceof Error
                   ? { name: streamOutcome.error.name, message: streamOutcome.error.message }
@@ -3113,8 +3178,8 @@ const server = createServer((req, res) => {
               });
               logRequest(requestId, 'stream read error before usable output, falling back', {
                 fallbackReason: streamOutcome.fallbackReason,
-                upstreamName: currentAttempt.endpoint.name,
-                nextFallbackName: endpoints[currentAttempt.endpointIndex + 1]?.name ?? null,
+                upstreamName: currentAttempt.channel.name,
+                nextFallbackName: endpoints[currentAttempt.channelIndex + 1]?.name ?? null,
                 streamMode,
                 wroteAnyEvent: streamOutcome.wroteAnyEvent,
                 wroteTextContent: streamOutcome.wroteTextContent,
@@ -3127,16 +3192,23 @@ const server = createServer((req, res) => {
               currentAttempt.dispose();
               currentAttempt = await fetchResponsesUpstream(
                 requestId,
+                upstreamRoute,
                 upstreamBody,
                 upstreamController.signal,
                 streamResponse,
                 fallbackBudget,
-                currentAttempt.endpointIndex + 1,
+                currentAttempt.channelIndex + 1,
               );
-              selectedEndpoint = currentAttempt.endpoint;
+              selectedChannelForLog = currentAttempt.channel;
               continue;
             }
 
+            reportAttemptFailure(currentAttempt, streamOutcome.fallbackReason ?? 'unknown_upstream_error', requestId, {
+              streamMode,
+              error: streamOutcome.error instanceof Error
+                ? { name: streamOutcome.error.name, message: streamOutcome.error.message }
+                : String(streamOutcome.error),
+            });
             currentAttempt.dispose();
             if (streamOutcome.startedStreaming && !res.writableEnded && !res.destroyed) {
               sendResponsesStreamError(res, 'Upstream stream terminated unexpectedly', {
@@ -3148,31 +3220,30 @@ const server = createServer((req, res) => {
               sendJson(res, 502, makeError('Upstream stream terminated unexpectedly', 502).body);
             }
             finish(502, 'stream read error', {
-              upstreamName: currentAttempt.endpoint.name,
+              upstreamName: currentAttempt.channel.name,
               streamMode,
               wroteTextContent: streamOutcome.wroteTextContent,
             });
             return;
           }
 
-          currentAttempt.dispose();
           if (streamOutcome.fallbackReason && canAttemptFallbackAfterStreamOutcome(
             streamOutcome,
             upstreamController.signal,
-            currentAttempt.endpointIndex,
+            currentAttempt.channelIndex,
             endpoints,
             fallbackBudget,
           )) {
             fallbackBudget.attemptsUsed += 1;
-            recordFallbackReason(streamOutcome.fallbackReason, currentAttempt.endpoint.name);
-            markEndpointFailure(currentAttempt.endpoint, streamOutcome.fallbackReason, requestId, {
+            recordFallbackReason(streamOutcome.fallbackReason, currentAttempt.channel.name);
+            reportAttemptFailure(currentAttempt, streamOutcome.fallbackReason, requestId, {
               streamMode,
               usageFound: Boolean(streamOutcome.usage),
             });
             logRequest(requestId, 'stream completed without usable output, falling back', {
               fallbackReason: streamOutcome.fallbackReason,
-              upstreamName: currentAttempt.endpoint.name,
-              nextFallbackName: endpoints[currentAttempt.endpointIndex + 1]?.name ?? null,
+              upstreamName: currentAttempt.channel.name,
+              nextFallbackName: endpoints[currentAttempt.channelIndex + 1]?.name ?? null,
               streamMode,
               wroteAnyEvent: streamOutcome.wroteAnyEvent,
               wroteTextContent: streamOutcome.wroteTextContent,
@@ -3182,21 +3253,23 @@ const server = createServer((req, res) => {
               chunkCount: streamOutcome.chunkCount,
               totalBytes: streamOutcome.totalBytes,
             });
+            currentAttempt.dispose();
             try {
               currentAttempt = await fetchResponsesUpstream(
                 requestId,
+                upstreamRoute,
                 upstreamBody,
                 upstreamController.signal,
                 streamResponse,
                 fallbackBudget,
-                currentAttempt.endpointIndex + 1,
+                currentAttempt.channelIndex + 1,
               );
             } catch (error) {
               const maybeAbortError = error as Error & { abortReason?: AbortReason };
               const maybeAbortObject = error as { abortReason?: AbortReason; error?: unknown };
-              const errorEndpoint = getEndpointFromError(error);
+              const errorEndpoint = getChannelFromError(error);
               if (errorEndpoint) {
-                selectedEndpoint = errorEndpoint;
+                selectedChannelForLog = errorEndpoint;
               }
               const abortReason = maybeAbortError.abortReason ?? maybeAbortObject.abortReason ?? getAbortReason(upstreamController.signal);
 
@@ -3209,7 +3282,7 @@ const server = createServer((req, res) => {
                 });
                 finish(504, 'stream fallback upstream timeout after incomplete output', {
                   phase: abortReason.phase,
-                  upstreamName: selectedEndpoint.name,
+                  upstreamName: selectedChannelForLog.name,
                 });
                 return;
               }
@@ -3217,18 +3290,17 @@ const server = createServer((req, res) => {
               if (isAbortErrorLike(error, abortReason) && abortReason?.kind === 'client_disconnect') {
                 finish(499, 'stream fallback cancelled by client after incomplete output', {
                   source: abortReason.source,
-                  upstreamName: selectedEndpoint.name,
+                  upstreamName: selectedChannelForLog.name,
                 });
                 return;
               }
 
               throw error;
             }
-            selectedEndpoint = currentAttempt.endpoint;
+            selectedChannelForLog = currentAttempt.channel;
             continue;
           }
 
-          currentAttempt.dispose();
           if (streamOutcome.fallbackReason) {
             const message = `No upstream endpoint produced a usable response before fallback was exhausted: ${streamOutcome.fallbackReason}`;
             sendResponsesStreamError(res, message, {
@@ -3236,9 +3308,14 @@ const server = createServer((req, res) => {
               code: 'server_error',
               sequenceNumber: streamOutcome.chunkCount + 1,
             });
+            reportAttemptFailure(currentAttempt, streamOutcome.fallbackReason, requestId, {
+              streamMode,
+              usageFound: Boolean(streamOutcome.usage),
+            });
+            currentAttempt.dispose();
             finish(502, 'stream fallback exhausted without usable output', {
               fallbackReason: streamOutcome.fallbackReason,
-              upstreamName: currentAttempt.endpoint.name,
+              upstreamName: currentAttempt.channel.name,
               streamMode,
               usageFound: Boolean(streamOutcome.usage),
               usageOutputTokens: streamOutcome.usage && typeof streamOutcome.usage.outputTokens === 'number' ? streamOutcome.usage.outputTokens : null,
@@ -3256,13 +3333,14 @@ const server = createServer((req, res) => {
           } else {
             proxyStats.responsesSseRaw += 1;
           }
-          markEndpointSuccess(currentAttempt.endpoint, requestId, { streamMode, path: 'stream_passthrough' });
+          reportAttemptSuccess(currentAttempt, requestId, { streamMode, path: 'stream_passthrough' });
+          currentAttempt.dispose();
 
           finish(200, 'stream passthrough returned', {
             upstreamContentType,
             upstreamStatus: currentAttempt.response.status,
             streamMode,
-            upstreamName: currentAttempt.endpoint.name,
+            upstreamName: currentAttempt.channel.name,
             usage: streamOutcome.usage,
           });
           return;
@@ -3270,7 +3348,7 @@ const server = createServer((req, res) => {
 
         if (currentAttempt.response.ok && !upstreamContentType.includes('application/json')) {
           logRequest(requestId, 'probing non-standard stream response', {
-            upstreamName: currentAttempt.endpoint.name,
+            upstreamName: currentAttempt.channel.name,
             upstreamStatus: currentAttempt.response.status,
             upstreamContentType,
             streamMode,
@@ -3283,13 +3361,20 @@ const server = createServer((req, res) => {
             streamMode,
             currentAttempt.controller,
           );
+          if (probeOutcome.kind !== 'client_disconnect' && probeOutcome.kind !== 'buffered_text' && (probeOutcome.kind !== 'completed' || probeOutcome.fallbackReason)) {
+            currentAttempt.reportFailure({
+              fallbackReason: probeOutcome.fallbackReason ?? 'unknown_upstream_error',
+              abortReason: getAbortReason(currentAttempt.controller.signal),
+              upstreamResponseObserved: true,
+            });
+          }
 
           if (probeOutcome.kind === 'timeout') {
             proxyStats.upstreamTimeouts += 1;
             const canFallback = canAttemptFallbackAfterStreamOutcome(
               probeOutcome,
               upstreamController.signal,
-              currentAttempt.endpointIndex,
+              currentAttempt.channelIndex,
               endpoints,
               fallbackBudget,
             );
@@ -3297,8 +3382,8 @@ const server = createServer((req, res) => {
             if (canFallback) {
               const fallbackReason = probeOutcome.fallbackReason ?? 'headers_only_timeout';
               fallbackBudget.attemptsUsed += 1;
-              recordFallbackReason(fallbackReason, currentAttempt.endpoint.name);
-              markEndpointFailure(currentAttempt.endpoint, fallbackReason, requestId, {
+              recordFallbackReason(fallbackReason, currentAttempt.channel.name);
+              reportAttemptFailure(currentAttempt, fallbackReason, requestId, {
                 phase: probeOutcome.phase,
                 streamMode,
               });
@@ -3306,8 +3391,8 @@ const server = createServer((req, res) => {
                 phase: probeOutcome.phase,
                 upstreamContentType,
                 upstreamStatus: currentAttempt.response.status,
-                upstreamName: currentAttempt.endpoint.name,
-                nextFallbackName: endpoints[currentAttempt.endpointIndex + 1]?.name ?? null,
+                upstreamName: currentAttempt.channel.name,
+                nextFallbackName: endpoints[currentAttempt.channelIndex + 1]?.name ?? null,
                 fallbackReason,
                 wroteAnyEvent: probeOutcome.wroteAnyEvent,
                 wroteTextContent: probeOutcome.wroteTextContent,
@@ -3317,16 +3402,21 @@ const server = createServer((req, res) => {
               currentAttempt.dispose();
               currentAttempt = await fetchResponsesUpstream(
                 requestId,
+                upstreamRoute,
                 upstreamBody,
                 upstreamController.signal,
                 streamResponse,
                 fallbackBudget,
-                currentAttempt.endpointIndex + 1,
+                currentAttempt.channelIndex + 1,
               );
-              selectedEndpoint = currentAttempt.endpoint;
+              selectedChannelForLog = currentAttempt.channel;
               continue;
             }
 
+            reportAttemptFailure(currentAttempt, probeOutcome.fallbackReason ?? 'headers_only_timeout', requestId, {
+              phase: probeOutcome.phase,
+              streamMode,
+            });
             currentAttempt.dispose();
             finish(504, 'non-standard stream probe timed out', {
               phase: probeOutcome.phase,
@@ -3335,7 +3425,7 @@ const server = createServer((req, res) => {
               chunkCount: probeOutcome.chunkCount,
               totalBytes: probeOutcome.totalBytes,
               streamMode,
-              upstreamName: currentAttempt.endpoint.name,
+              upstreamName: currentAttempt.channel.name,
               startedStreaming: probeOutcome.startedStreaming,
               wroteAnyEvent: probeOutcome.wroteAnyEvent,
               wroteTextContent: probeOutcome.wroteTextContent,
@@ -3353,7 +3443,7 @@ const server = createServer((req, res) => {
               chunkCount: probeOutcome.chunkCount,
               totalBytes: probeOutcome.totalBytes,
               streamMode,
-              upstreamName: currentAttempt.endpoint.name,
+              upstreamName: currentAttempt.channel.name,
             });
             return;
           }
@@ -3362,43 +3452,47 @@ const server = createServer((req, res) => {
             const canFallback = canAttemptFallbackAfterStreamOutcome(
               probeOutcome,
               upstreamController.signal,
-              currentAttempt.endpointIndex,
+              currentAttempt.channelIndex,
               endpoints,
               fallbackBudget,
             );
 
             if (canFallback && probeOutcome.fallbackReason) {
               fallbackBudget.attemptsUsed += 1;
-              recordFallbackReason(probeOutcome.fallbackReason, currentAttempt.endpoint.name);
-              markEndpointFailure(currentAttempt.endpoint, probeOutcome.fallbackReason, requestId, {
+              recordFallbackReason(probeOutcome.fallbackReason, currentAttempt.channel.name);
+              reportAttemptFailure(currentAttempt, probeOutcome.fallbackReason, requestId, {
                 streamMode,
               });
               logRequest(requestId, 'non-standard stream read error before usable output, falling back', {
                 fallbackReason: probeOutcome.fallbackReason,
                 upstreamContentType,
                 upstreamStatus: currentAttempt.response.status,
-                upstreamName: currentAttempt.endpoint.name,
-                nextFallbackName: endpoints[currentAttempt.endpointIndex + 1]?.name ?? null,
+                upstreamName: currentAttempt.channel.name,
+                nextFallbackName: endpoints[currentAttempt.channelIndex + 1]?.name ?? null,
               });
               await closeResponseBody(currentAttempt.response);
               currentAttempt.dispose();
               currentAttempt = await fetchResponsesUpstream(
                 requestId,
+                upstreamRoute,
                 upstreamBody,
                 upstreamController.signal,
                 streamResponse,
                 fallbackBudget,
-                currentAttempt.endpointIndex + 1,
+                currentAttempt.channelIndex + 1,
               );
-              selectedEndpoint = currentAttempt.endpoint;
+              selectedChannelForLog = currentAttempt.channel;
               continue;
             }
 
+            reportAttemptFailure(currentAttempt, probeOutcome.fallbackReason ?? 'unknown_upstream_error', requestId, {
+              streamMode,
+            });
             currentAttempt.dispose();
             sendJson(res, 502, makeError('Upstream stream terminated unexpectedly', 502).body);
             finish(502, 'non-standard stream read error', {
               upstreamContentType,
-              upstreamName: currentAttempt.endpoint.name,
+              upstreamName: currentAttempt.channel.name,
             });
             return;
           }
@@ -3409,22 +3503,22 @@ const server = createServer((req, res) => {
               canAttemptFallbackAfterStreamOutcome(
                 probeOutcome,
                 upstreamController.signal,
-                currentAttempt.endpointIndex,
+                currentAttempt.channelIndex,
                 endpoints,
                 fallbackBudget,
               )
             ) {
               fallbackBudget.attemptsUsed += 1;
-              recordFallbackReason(probeOutcome.fallbackReason, currentAttempt.endpoint.name);
-              markEndpointFailure(currentAttempt.endpoint, probeOutcome.fallbackReason, requestId, {
+              recordFallbackReason(probeOutcome.fallbackReason, currentAttempt.channel.name);
+              reportAttemptFailure(currentAttempt, probeOutcome.fallbackReason, requestId, {
                 streamMode,
               });
               logRequest(requestId, 'non-standard stream completed without usable output, falling back', {
                 fallbackReason: probeOutcome.fallbackReason,
                 upstreamContentType,
                 upstreamStatus: currentAttempt.response.status,
-                upstreamName: currentAttempt.endpoint.name,
-                nextFallbackName: endpoints[currentAttempt.endpointIndex + 1]?.name ?? null,
+                upstreamName: currentAttempt.channel.name,
+                nextFallbackName: endpoints[currentAttempt.channelIndex + 1]?.name ?? null,
                 wroteAnyEvent: probeOutcome.wroteAnyEvent,
                 wroteTextContent: probeOutcome.wroteTextContent,
                 textCharCount: probeOutcome.textCharCount,
@@ -3433,17 +3527,17 @@ const server = createServer((req, res) => {
               currentAttempt.dispose();
               currentAttempt = await fetchResponsesUpstream(
                 requestId,
+                upstreamRoute,
                 upstreamBody,
                 upstreamController.signal,
                 streamResponse,
                 fallbackBudget,
-                currentAttempt.endpointIndex + 1,
+                currentAttempt.channelIndex + 1,
               );
-              selectedEndpoint = currentAttempt.endpoint;
+              selectedChannelForLog = currentAttempt.channel;
               continue;
             }
 
-            currentAttempt.dispose();
             if (probeOutcome.fallbackReason) {
               const message = `No upstream endpoint produced a usable response before fallback was exhausted: ${probeOutcome.fallbackReason}`;
               sendResponsesStreamError(res, message, {
@@ -3451,11 +3545,15 @@ const server = createServer((req, res) => {
                 code: 'server_error',
                 sequenceNumber: probeOutcome.chunkCount + 1,
               });
+              reportAttemptFailure(currentAttempt, probeOutcome.fallbackReason, requestId, {
+                streamMode,
+              });
+              currentAttempt.dispose();
               finish(502, 'non-standard stream fallback exhausted without usable output', {
                 fallbackReason: probeOutcome.fallbackReason,
                 upstreamContentType,
                 upstreamStatus: currentAttempt.response.status,
-                upstreamName: currentAttempt.endpoint.name,
+                upstreamName: currentAttempt.channel.name,
                 streamMode,
                 chunkCount: probeOutcome.chunkCount,
                 totalBytes: probeOutcome.totalBytes,
@@ -3471,13 +3569,14 @@ const server = createServer((req, res) => {
             } else {
               proxyStats.responsesSseRaw += 1;
             }
-            markEndpointSuccess(currentAttempt.endpoint, requestId, { streamMode, path: 'stream_probe' });
+            reportAttemptSuccess(currentAttempt, requestId, { streamMode, path: 'stream_probe' });
+            currentAttempt.dispose();
 
             finish(200, 'non-standard stream normalized to sse', {
               upstreamContentType,
               upstreamStatus: currentAttempt.response.status,
               streamMode,
-              upstreamName: currentAttempt.endpoint.name,
+              upstreamName: currentAttempt.channel.name,
               usage: probeOutcome.usage,
               wroteAnyEvent: probeOutcome.wroteAnyEvent,
               wroteTextContent: probeOutcome.wroteTextContent,
@@ -3520,7 +3619,7 @@ const server = createServer((req, res) => {
 
             finish(upstreamResponse.status, 'buffered upstream stream error returned as sse', {
               upstreamContentType,
-              upstreamName: selectedEndpoint.name,
+              upstreamName: selectedChannelForLog.name,
               eventCount: sseEvents.length,
               streamMode,
             });
@@ -3551,13 +3650,13 @@ const server = createServer((req, res) => {
           } else {
             proxyStats.responsesSseRaw += 1;
           }
-          markEndpointSuccess(upstreamAttempt.endpoint, requestId, { streamMode, path: 'buffered_stream' });
+          reportAttemptSuccess(upstreamAttempt, requestId, { streamMode, path: 'buffered_stream' });
 
           finish(200, 'buffered upstream stream returned as sse', {
             upstreamContentType,
             upstreamStatus: upstreamResponse.status,
             eventCount: sseEvents.length,
-            upstreamName: selectedEndpoint.name,
+            upstreamName: selectedChannelForLog.name,
             streamMode,
             usage: bufferedUsage,
             fallbackReason,
@@ -3588,30 +3687,32 @@ const server = createServer((req, res) => {
           const abortReason = getAbortReason(upstreamAttempt.controller.signal) ?? getAbortReason(upstreamController.signal);
           if (error instanceof Error && error.name === 'AbortError' && abortReason?.kind === 'timeout') {
             proxyStats.upstreamTimeouts += 1;
+            reportAttemptFailure(upstreamAttempt, 'body_timeout', requestId, { phase: abortReason.phase });
             upstreamAttempt.dispose();
 
-            if (canAttemptFallback(upstreamController.signal, upstreamAttempt.endpointIndex, responsesEndpoints, fallbackBudget)) {
+            if (canAttemptFallback(upstreamController.signal, upstreamAttempt.channelIndex, routeChannels, fallbackBudget)) {
               fallbackBudget.attemptsUsed += 1;
-              recordFallbackReason('headers_only_timeout', selectedEndpoint.name);
-              markEndpointFailure(upstreamAttempt.endpoint, 'body_timeout', requestId, {
+              recordFallbackReason('headers_only_timeout', selectedChannelForLog.name);
+              reportAttemptFailure(upstreamAttempt, 'body_timeout', requestId, {
                 phase: abortReason.phase,
                 upstreamContentType,
               });
               logRequest(requestId, 'upstream body timeout, falling back', {
                 phase: abortReason.phase,
-                upstreamName: selectedEndpoint.name,
+                upstreamName: selectedChannelForLog.name,
                 upstreamContentType,
-                nextFallbackName: responsesEndpoints[upstreamAttempt.endpointIndex + 1]?.name ?? null,
+                nextFallbackName: routeChannels[upstreamAttempt.channelIndex + 1]?.name ?? null,
               });
               upstreamAttempt = await fetchResponsesUpstream(
                 requestId,
+                upstreamRoute,
                 upstreamBody,
                 upstreamController.signal,
                 streamResponse,
                 fallbackBudget,
-                upstreamAttempt.endpointIndex + 1,
+                upstreamAttempt.channelIndex + 1,
               );
-              selectedEndpoint = upstreamAttempt.endpoint;
+              selectedChannelForLog = upstreamAttempt.channel;
               continue;
             }
 
@@ -3625,7 +3726,7 @@ const server = createServer((req, res) => {
                 total: totalRequestTimeoutMs,
               }), 504).body,
             );
-            finish(504, 'upstream body timeout', { phase: abortReason.phase, upstreamContentType, upstreamName: selectedEndpoint.name });
+            finish(504, 'upstream body timeout', { phase: abortReason.phase, upstreamContentType, upstreamName: selectedChannelForLog.name });
             return;
           }
 
@@ -3633,35 +3734,37 @@ const server = createServer((req, res) => {
             finish(499, 'client disconnected while reading upstream body', {
               source: abortReason.source,
               upstreamContentType,
-              upstreamName: selectedEndpoint.name,
+              upstreamName: selectedChannelForLog.name,
             });
             upstreamAttempt.dispose();
             return;
           }
 
+          reportAttemptFailure(upstreamAttempt, 'unknown_upstream_error', requestId, { error });
           upstreamAttempt.dispose();
 
-          if (canAttemptFallback(upstreamController.signal, upstreamAttempt.endpointIndex, responsesEndpoints, fallbackBudget)) {
+          if (canAttemptFallback(upstreamController.signal, upstreamAttempt.channelIndex, routeChannels, fallbackBudget)) {
             fallbackBudget.attemptsUsed += 1;
-            recordFallbackReason('unknown_upstream_error', selectedEndpoint.name);
-            markEndpointFailure(upstreamAttempt.endpoint, 'unknown_upstream_error', requestId, {
+            recordFallbackReason('unknown_upstream_error', selectedChannelForLog.name);
+            reportAttemptFailure(upstreamAttempt, 'unknown_upstream_error', requestId, {
               upstreamContentType,
             });
             logRequest(requestId, 'unhandled upstream body read error, falling back', {
-              upstreamName: selectedEndpoint.name,
+              upstreamName: selectedChannelForLog.name,
               upstreamContentType,
-              nextFallbackName: responsesEndpoints[upstreamAttempt.endpointIndex + 1]?.name ?? null,
+              nextFallbackName: routeChannels[upstreamAttempt.channelIndex + 1]?.name ?? null,
               error: error instanceof Error ? { name: error.name, message: error.message } : String(error),
             });
             upstreamAttempt = await fetchResponsesUpstream(
               requestId,
-              upstreamBody,
+                upstreamRoute,
+                upstreamBody,
               upstreamController.signal,
               streamResponse,
               fallbackBudget,
-              upstreamAttempt.endpointIndex + 1,
+              upstreamAttempt.channelIndex + 1,
             );
-            selectedEndpoint = upstreamAttempt.endpoint;
+            selectedChannelForLog = upstreamAttempt.channel;
             continue;
           }
 
@@ -3675,27 +3778,29 @@ const server = createServer((req, res) => {
         try {
           jsonPayload = JSON.parse(upstreamText);
         } catch {
-          if (canAttemptFallback(upstreamController.signal, upstreamAttempt.endpointIndex, responsesEndpoints, fallbackBudget)) {
+          reportAttemptFailure(upstreamAttempt, 'unknown_upstream_error', requestId, { upstreamStatus: upstreamResponse.status });
+          if (canAttemptFallback(upstreamController.signal, upstreamAttempt.channelIndex, routeChannels, fallbackBudget)) {
             fallbackBudget.attemptsUsed += 1;
-            recordFallbackReason('unknown_upstream_error', selectedEndpoint.name);
-            markEndpointFailure(upstreamAttempt.endpoint, 'unknown_upstream_error', requestId, {
+            recordFallbackReason('unknown_upstream_error', selectedChannelForLog.name);
+            reportAttemptFailure(upstreamAttempt, 'unknown_upstream_error', requestId, {
               upstreamStatus: upstreamResponse.status,
             });
             logRequest(requestId, 'upstream invalid json, falling back', {
               upstreamStatus: upstreamResponse.status,
-              upstreamName: selectedEndpoint.name,
-              nextFallbackName: responsesEndpoints[upstreamAttempt.endpointIndex + 1]?.name ?? null,
+              upstreamName: selectedChannelForLog.name,
+              nextFallbackName: routeChannels[upstreamAttempt.channelIndex + 1]?.name ?? null,
             });
             upstreamAttempt.dispose();
             upstreamAttempt = await fetchResponsesUpstream(
               requestId,
-              upstreamBody,
+              upstreamRoute,
+                upstreamBody,
               upstreamController.signal,
               streamResponse,
               fallbackBudget,
-              upstreamAttempt.endpointIndex + 1,
+              upstreamAttempt.channelIndex + 1,
             );
-            selectedEndpoint = upstreamAttempt.endpoint;
+            selectedChannelForLog = upstreamAttempt.channel;
             continue;
           }
 
@@ -3704,7 +3809,7 @@ const server = createServer((req, res) => {
             502,
             makeError('Upstream returned invalid JSON', 502, upstreamText.slice(0, 2000)).body,
           );
-          finish(502, 'upstream invalid json', { upstreamStatus: upstreamResponse.status, upstreamName: selectedEndpoint.name });
+          finish(502, 'upstream invalid json', { upstreamStatus: upstreamResponse.status, upstreamName: selectedChannelForLog.name });
           upstreamAttempt.dispose();
           return;
         }
@@ -3712,7 +3817,7 @@ const server = createServer((req, res) => {
         if (!upstreamResponse.ok) {
           sendJson(res, upstreamResponse.status, normalizeErrorPayload(upstreamResponse.status, jsonPayload));
           finish(upstreamResponse.status, 'upstream json error', {
-            upstreamName: selectedEndpoint.name,
+            upstreamName: selectedChannelForLog.name,
             upstreamStatus: upstreamResponse.status,
             upstreamErrorPreview:
               upstreamResponse.status >= 500
@@ -3723,29 +3828,33 @@ const server = createServer((req, res) => {
           return;
         }
 
+        observeUpstreamFailure(upstreamAttempt.controller, jsonPayload, upstreamResponse.status);
+        if (isJsonRecord(jsonPayload)) extractUsageFromStreamPayload(jsonPayload, upstreamBody);
         const responseObject = coerceResponseObject(jsonPayload);
         if (!responseObject) {
-          if (canAttemptFallback(upstreamController.signal, upstreamAttempt.endpointIndex, responsesEndpoints, fallbackBudget)) {
+          reportAttemptFailure(upstreamAttempt, 'empty_response', requestId, { upstreamStatus: upstreamResponse.status });
+          if (canAttemptFallback(upstreamController.signal, upstreamAttempt.channelIndex, routeChannels, fallbackBudget)) {
             fallbackBudget.attemptsUsed += 1;
-            recordFallbackReason('empty_response', selectedEndpoint.name);
-            markEndpointFailure(upstreamAttempt.endpoint, 'empty_response', requestId, {
+            recordFallbackReason('empty_response', selectedChannelForLog.name);
+            reportAttemptFailure(upstreamAttempt, 'empty_response', requestId, {
               upstreamStatus: upstreamResponse.status,
             });
             logRequest(requestId, 'upstream json missing response object, falling back', {
-              upstreamName: selectedEndpoint.name,
+              upstreamName: selectedChannelForLog.name,
               upstreamStatus: upstreamResponse.status,
-              nextFallbackName: responsesEndpoints[upstreamAttempt.endpointIndex + 1]?.name ?? null,
+              nextFallbackName: routeChannels[upstreamAttempt.channelIndex + 1]?.name ?? null,
             });
             upstreamAttempt.dispose();
             upstreamAttempt = await fetchResponsesUpstream(
               requestId,
-              upstreamBody,
+              upstreamRoute,
+                upstreamBody,
               upstreamController.signal,
               streamResponse,
               fallbackBudget,
-              upstreamAttempt.endpointIndex + 1,
+              upstreamAttempt.channelIndex + 1,
             );
-            selectedEndpoint = upstreamAttempt.endpoint;
+            selectedChannelForLog = upstreamAttempt.channel;
             continue;
           }
 
@@ -3754,7 +3863,7 @@ const server = createServer((req, res) => {
             502,
             makeError('Upstream JSON did not contain a valid response object', 502, jsonPayload as JsonValue).body,
           );
-          finish(502, 'upstream json missing response object', { upstreamName: selectedEndpoint.name });
+          finish(502, 'upstream json missing response object', { upstreamName: selectedChannelForLog.name });
           upstreamAttempt.dispose();
           return;
         }
@@ -3762,12 +3871,14 @@ const server = createServer((req, res) => {
         const normalizedResponse = normalizeResponseObject(responseObject, requestBody);
         const usage = extractUsageMetrics(normalizedResponse);
         const hasTextOutput = hasMeaningfulResponseOutput(normalizedResponse);
+        const invalid = !hasTextOutput || upstreamFailures.has(upstreamAttempt.controller);
+        if (invalid) reportAttemptFailure(upstreamAttempt, !hasTextOutput ? 'empty_response' : 'unknown_upstream_error', requestId, { upstreamStatus: upstreamResponse.status });
 
-        if ((!hasTextOutput || !usage) && canAttemptFallback(upstreamController.signal, upstreamAttempt.endpointIndex, responsesEndpoints, fallbackBudget)) {
+        if (invalid && canAttemptFallback(upstreamController.signal, upstreamAttempt.channelIndex, routeChannels, fallbackBudget)) {
           const fallbackReason = !hasTextOutput ? 'empty_response' : 'stream_missing_usage';
           fallbackBudget.attemptsUsed += 1;
-          recordFallbackReason(fallbackReason, selectedEndpoint.name);
-          markEndpointFailure(upstreamAttempt.endpoint, fallbackReason, requestId, {
+          recordFallbackReason(fallbackReason, selectedChannelForLog.name);
+          reportAttemptFailure(upstreamAttempt, fallbackReason, requestId, {
             upstreamStatus: upstreamResponse.status,
             usageFound: Boolean(usage),
             hasTextOutput,
@@ -3776,33 +3887,40 @@ const server = createServer((req, res) => {
             fallbackReason,
             upstreamContentType,
             upstreamStatus: upstreamResponse.status,
-            upstreamName: selectedEndpoint.name,
+            upstreamName: selectedChannelForLog.name,
             usageFound: Boolean(usage),
             hasTextOutput,
-            nextFallbackName: responsesEndpoints[upstreamAttempt.endpointIndex + 1]?.name ?? null,
+            nextFallbackName: routeChannels[upstreamAttempt.channelIndex + 1]?.name ?? null,
           });
           upstreamAttempt.dispose();
           upstreamAttempt = await fetchResponsesUpstream(
             requestId,
-            upstreamBody,
+              upstreamRoute,
+                upstreamBody,
             upstreamController.signal,
             streamResponse,
             fallbackBudget,
-            upstreamAttempt.endpointIndex + 1,
+            upstreamAttempt.channelIndex + 1,
           );
-          selectedEndpoint = upstreamAttempt.endpoint;
+          selectedChannelForLog = upstreamAttempt.channel;
           continue;
         }
 
+        if (invalid) {
+          sendJson(res, 502, makeError('No upstream endpoint produced a usable response before fallback was exhausted', 502, { reason: 'fallback_exhausted' }).body);
+          upstreamAttempt.dispose();
+          finish(502, 'json fallback exhausted');
+          return;
+        }
         cacheResponse(normalizedResponse);
         addUsageToStats(usage);
         proxyStats.responsesJson += 1;
-        markEndpointSuccess(upstreamAttempt.endpoint, requestId, { path: 'json_response' });
+        reportAttemptSuccess(upstreamAttempt, requestId, { path: 'json_response' });
         sendJson(res, 200, normalizedResponse);
         finish(200, 'json response returned', {
           upstreamContentType,
           upstreamStatus: upstreamResponse.status,
-          upstreamName: selectedEndpoint.name,
+          upstreamName: selectedChannelForLog.name,
           usage,
         });
         upstreamAttempt.dispose();
@@ -3810,6 +3928,11 @@ const server = createServer((req, res) => {
       }
 
       const sseEvents = parseSse(upstreamText);
+      for (const event of sseEvents) {
+        const payload = parseStreamPayload(event.data);
+        observeUpstreamFailure(upstreamAttempt.controller, payload, upstreamResponse.status);
+        extractUsageFromStreamPayload(payload, upstreamBody);
+      }
       logSseDebug(requestId, sseEvents);
       const responseObject = synthesizeResponseFromEvents(sseEvents);
 
@@ -3819,34 +3942,36 @@ const server = createServer((req, res) => {
           upstreamResponse.status,
           normalizeErrorPayload(upstreamResponse.status, responseObject ?? upstreamText),
         );
-        finish(upstreamResponse.status, 'upstream sse error', { upstreamContentType, upstreamName: selectedEndpoint.name });
+        finish(upstreamResponse.status, 'upstream sse error', { upstreamContentType, upstreamName: selectedChannelForLog.name });
         upstreamAttempt.dispose();
         return;
       }
 
       if (!responseObject) {
-        if (canAttemptFallback(upstreamController.signal, upstreamAttempt.endpointIndex, responsesEndpoints, fallbackBudget)) {
+        reportAttemptFailure(upstreamAttempt, 'sse_reconstruction_failure', requestId, { upstreamStatus: upstreamResponse.status });
+        if (canAttemptFallback(upstreamController.signal, upstreamAttempt.channelIndex, routeChannels, fallbackBudget)) {
           fallbackBudget.attemptsUsed += 1;
-          recordFallbackReason('sse_reconstruction_failure', selectedEndpoint.name);
-          markEndpointFailure(upstreamAttempt.endpoint, 'sse_reconstruction_failure', requestId, {
+          recordFallbackReason('sse_reconstruction_failure', selectedChannelForLog.name);
+          reportAttemptFailure(upstreamAttempt, 'sse_reconstruction_failure', requestId, {
             upstreamStatus: upstreamResponse.status,
           });
           logRequest(requestId, 'failed to normalize sse payload, falling back', {
             upstreamContentType,
             upstreamStatus: upstreamResponse.status,
-            upstreamName: selectedEndpoint.name,
-            nextFallbackName: responsesEndpoints[upstreamAttempt.endpointIndex + 1]?.name ?? null,
+            upstreamName: selectedChannelForLog.name,
+            nextFallbackName: routeChannels[upstreamAttempt.channelIndex + 1]?.name ?? null,
           });
           upstreamAttempt.dispose();
           upstreamAttempt = await fetchResponsesUpstream(
             requestId,
-            upstreamBody,
+            upstreamRoute,
+                upstreamBody,
             upstreamController.signal,
             streamResponse,
             fallbackBudget,
-            upstreamAttempt.endpointIndex + 1,
+            upstreamAttempt.channelIndex + 1,
           );
-          selectedEndpoint = upstreamAttempt.endpoint;
+          selectedChannelForLog = upstreamAttempt.channel;
           continue;
         }
 
@@ -3859,7 +3984,7 @@ const server = createServer((req, res) => {
             preview: upstreamText.slice(0, 2000),
           }).body,
         );
-        finish(502, 'failed to normalize sse payload', { upstreamContentType, upstreamName: selectedEndpoint.name });
+        finish(502, 'failed to normalize sse payload', { upstreamContentType, upstreamName: selectedChannelForLog.name });
         upstreamAttempt.dispose();
         return;
       }
@@ -3867,12 +3992,14 @@ const server = createServer((req, res) => {
       const normalizedResponse = normalizeResponseObject(responseObject, requestBody);
       const usage = extractUsageMetrics(normalizedResponse);
       const hasTextOutput = hasMeaningfulResponseOutput(normalizedResponse);
+      const invalid = !hasTextOutput || upstreamFailures.has(upstreamAttempt.controller);
+      if (invalid) reportAttemptFailure(upstreamAttempt, !hasTextOutput ? 'empty_response' : 'unknown_upstream_error', requestId, { upstreamStatus: upstreamResponse.status });
 
-      if ((!hasTextOutput || !usage) && canAttemptFallback(upstreamController.signal, upstreamAttempt.endpointIndex, responsesEndpoints, fallbackBudget)) {
+      if (invalid && canAttemptFallback(upstreamController.signal, upstreamAttempt.channelIndex, routeChannels, fallbackBudget)) {
         const fallbackReason = !hasTextOutput ? 'empty_response' : 'stream_missing_usage';
         fallbackBudget.attemptsUsed += 1;
-        recordFallbackReason(fallbackReason, selectedEndpoint.name);
-        markEndpointFailure(upstreamAttempt.endpoint, fallbackReason, requestId, {
+        recordFallbackReason(fallbackReason, selectedChannelForLog.name);
+        reportAttemptFailure(upstreamAttempt, fallbackReason, requestId, {
           upstreamStatus: upstreamResponse.status,
           eventCount: sseEvents.length,
           usageFound: Boolean(usage),
@@ -3883,43 +4010,47 @@ const server = createServer((req, res) => {
           upstreamContentType,
           upstreamStatus: upstreamResponse.status,
           eventCount: sseEvents.length,
-          upstreamName: selectedEndpoint.name,
+          upstreamName: selectedChannelForLog.name,
           usageFound: Boolean(usage),
           hasTextOutput,
-          nextFallbackName: responsesEndpoints[upstreamAttempt.endpointIndex + 1]?.name ?? null,
+          nextFallbackName: routeChannels[upstreamAttempt.channelIndex + 1]?.name ?? null,
         });
         upstreamAttempt.dispose();
         upstreamAttempt = await fetchResponsesUpstream(
           requestId,
-          upstreamBody,
+          upstreamRoute,
+                upstreamBody,
           upstreamController.signal,
           streamResponse,
           fallbackBudget,
-          upstreamAttempt.endpointIndex + 1,
+          upstreamAttempt.channelIndex + 1,
         );
-        selectedEndpoint = upstreamAttempt.endpoint;
+        selectedChannelForLog = upstreamAttempt.channel;
         continue;
       }
 
+      if (invalid) {
+        sendJson(res, 502, makeError('No upstream endpoint produced a usable response before fallback was exhausted', 502, { reason: 'fallback_exhausted' }).body);
+        upstreamAttempt.dispose();
+        finish(502, 'sse json fallback exhausted');
+        return;
+      }
       cacheResponse(normalizedResponse);
       addUsageToStats(usage);
       proxyStats.responsesJson += 1;
-      markEndpointSuccess(upstreamAttempt.endpoint, requestId, { path: 'sse_to_json' });
+      reportAttemptSuccess(upstreamAttempt, requestId, { path: 'sse_to_json' });
       sendJson(res, 200, normalizedResponse);
       finish(200, 'sse normalized to json', {
         upstreamContentType,
         upstreamStatus: upstreamResponse.status,
         eventCount: sseEvents.length,
-        upstreamName: selectedEndpoint.name,
+        upstreamName: selectedChannelForLog.name,
         usage,
       });
       upstreamAttempt.dispose();
       return;
     }
   } catch (error) {
-    if (selectedEndpoint) {
-      markEndpointFailure(selectedEndpoint, 'proxy_unhandled_error', requestId);
-    }
     const errorDetails = error instanceof Error ? { name: error.name, message: error.message } : String(error);
 
     if (res.headersSent || res.writableEnded || res.destroyed) {
@@ -3946,7 +4077,10 @@ const server = createServer((req, res) => {
       error: errorDetails,
     });
   } finally {
-    clearTimeout(totalTimeout);
+    usageContext.getStore()?.current?.finish();
+    if (totalTimeout !== undefined) {
+      clearTimeout(totalTimeout);
+    }
     req.off('aborted', handleRequestAborted);
     res.off('close', handleResponseClosed);
 
@@ -3954,22 +4088,27 @@ const server = createServer((req, res) => {
       activeRequests -= 1;
     }
   }
-  });
+  }));
 });
 
 
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    stopUptimeSampling();
+    server.close(() => {
+      void _usageStore.close().then(() => process.exit(0), error => { console.error(error); process.exit(1); });
+    });
+  });
+}
 
 server.listen(_initialSnapshot.config.port, _initialSnapshot.config.host, () => {
   const c = _initialSnapshot.config;
   console.log(`Instance: ${c.instanceName}`);
   console.log(`JSON proxy listening on http://${c.host}:${c.port}`);
-  console.log(`Primary provider: ${c.primaryProviderName}`);
-  console.log(`Forwarding POST /v1/responses to ${c.upstreamUrl}`);
-  console.log(`Fallback config path: ${c.fallbackConfigPath}`);
-  console.log(`Model mapping path: ${c.modelMappingPath}`);
-  console.log(
-    `Model aliases: ${Object.keys(c.modelMappings).length === 0 ? 'none' : Object.entries(c.modelMappings).map(([alias, target]) => `${alias} -> ${target}`).join(', ')}`,
-  );
+  console.log(`Routing config path: ${c.routingConfigPath}`);
+  console.log(`Configured models: ${listConfiguredModels(c.routingConfig).join(', ')}`);
+  console.log(`Configured channels: ${Array.from(c.routingConfig.channelsById.values()).map(channel => channel.name).join(', ')}`);
   console.log(`Concurrency limit: ${c.maxConcurrentRequests}, upstream timeout: ${c.upstreamTimeoutMs}ms`);
   console.log(`Non-stream upstream timeout: ${c.nonStreamingRequestTimeoutMs}ms`);
   console.log(`First-byte timeout: ${c.firstByteTimeoutMs}ms, stream idle timeout: ${c.streamIdleTimeoutMs}ms`);
@@ -3992,12 +4131,11 @@ server.listen(_initialSnapshot.config.port, _initialSnapshot.config.host, () => 
   console.log(`SSE debug logging: ${c.debugSse ? 'enabled' : 'disabled'}`);
   console.log(`Retryable 4xx fallback: ${c.fallbackOnRetryable4xx ? 'enabled' : 'disabled'}`);
   console.log(`Compatibility 4xx fallback: ${c.fallbackOnCompat4xx ? 'enabled' : 'disabled'}`);
-  console.log(`Endpoint timeout cooldown: ${c.endpointTimeoutCooldownMs}ms`);
-  console.log(`Endpoint invalid-response cooldown: ${c.endpointInvalidResponseCooldownMs}ms`);
-  console.log(`Endpoint auth cooldown: ${c.endpointAuthCooldownMs}ms`);
-  console.log(`Endpoint failure threshold: ${c.endpointFailureThreshold}`);
-  console.log(`Endpoint half-open max probes: ${c.endpointHalfOpenMaxProbes}`);
-  console.log(`Fallback attempt budget: ${c.maxFallbackAttempts}`);
+  console.log(`Health window: ${c.healthWindowMs}ms; failures >= ${c.healthFailureThreshold} and rate > ${c.healthFailureRateThreshold}`);
+  console.log(`Ordinary/manual cooldown: ${c.healthCooldownMs}ms`);
+  console.log(`Quota-exhaustion cooldown: ${c.quotaCooldownMs}ms`);
+  console.log(`Per-channel attempt limit: ${c.channelMaxAttempts}, retry delay: ${c.channelRetryDelayMs}ms`);
+  console.log(`Cache-key history capacity: ${c.cacheKeyPoolSize}; strict route priority`);
   console.log(`Fallback total budget: ${c.maxFallbackTotalMs}ms`);
   console.log(
     `SSE failure capture: ${c.sseFailureDebugEnabled ? `enabled -> ${c.sseFailureDebugDir}` : 'disabled'}`,
@@ -4005,7 +4143,5 @@ server.listen(_initialSnapshot.config.port, _initialSnapshot.config.host, () => 
   console.log(
     `Stream missing usage capture: ${c.streamMissingUsageDebugEnabled ? `enabled -> ${c.streamMissingUsageDebugDir}` : 'disabled'}`,
   );
-  console.log(
-    `Fallback upstreams: ${c.fallbackEndpoints.length === 0 ? 'none' : c.fallbackEndpoints.map(item => item.name).join(', ')}`,
-  );
+  triggerCompactDetection();
 });

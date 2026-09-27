@@ -101,13 +101,24 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
+      default_model: 'tool-model',
+      channels: [
         {
-          name: 'fallback-a',
+          id: 'primary',
+          name: 'tool-call-primary',
+          base_url: `http://127.0.0.1:${primaryAddress.port}`,
+          api_key: 'primary-key',
+        },
+        {
+          id: 'fallback-a',
           base_url: `http://127.0.0.1:${fallbackAddress.port}`,
           api_key: 'fallback-key',
         },
       ],
+      models: {
+        'tool-model': { channel_ids: ['primary', 'fallback-a'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -120,9 +131,11 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-stream-tool-call-check',
-      PRIMARY_PROVIDER_NAME: 'tool-call-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${primaryAddress.port}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -72,6 +72,13 @@ export function classifyProxyTerminalError(error: unknown) {
   const abortReason = isProxyAbortReason(maybe?.abortReason) ? maybe?.abortReason : undefined;
   const endpoint = extractEndpointSummary(maybe?.endpoint);
 
+  if (error instanceof Error && error.message === 'No model channel available after fallback attempts') {
+    return { statusCode: 502, body: normalizeErrorPayload(502, { error: {
+      message: 'No upstream endpoint produced a usable response before fallback was exhausted',
+      type: 'server_error', details: { reason: 'fallback_exhausted' },
+    } }) };
+  }
+
   if (abortReason?.kind === 'timeout') {
     return {
       statusCode: 504,

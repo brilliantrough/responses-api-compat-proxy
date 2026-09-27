@@ -3,79 +3,103 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Admin Config</title>
+<meta name="theme-color" content="#ffffff">
+<title>Admin Configuration · Relay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ffffff'/%3E%3Cpath d='M8 12v13m8-19v19m8-16v11' stroke='%233b63dc' stroke-width='4'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/admin/assets/admin.css">
 </head>
 <body>
-<div class="admin-shell">
-  <header class="topbar">
-    <div class="topbar-main">
-      <div class="topbar-identity">
-        <h1>Admin Config</h1>
-        <div id="instance-summary" class="meta-row">Loading instance...</div>
-      </div>
-      <div class="topbar-status">
-        <span id="dirty-badge" class="badge badge-ok" style="display:none">Unsaved changes</span>
-        <span id="topbar-runtime-version" class="badge">Runtime -</span>
-        <span id="topbar-active-requests" class="badge">Active -</span>
-      </div>
-      <div class="topbar-actions btn-row">
-        <button id="btn-validate" class="primary">Validate</button>
-        <button id="btn-reload" class="warning">Reload</button>
-        <button id="btn-rollback" class="danger">Rollback</button>
-        <button id="btn-save" class="primary">Save</button>
-      </div>
-    </div>
-    <div id="status" class="notice notice-info">Loading...</div>
-    <div id="restart-notice" style="display:none"></div>
-    <div id="validation-result"></div>
-    <div id="action-result"></div>
-  </header>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<div class="admin-shell app-shell">
+  <aside class="app-sidebar">
+    <a class="brand" href="/admin" aria-label="Relay home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>relay<span class="brand-caption">RESPONSES GATEWAY</span></span></a>
+    <div class="workspace-label"><span class="workspace-avatar">R</span><div>Proxy workspace<small>OpenAI-compatible API</small></div></div>
+    <nav class="app-nav" aria-label="Main navigation">
+      <div class="nav-label">WORKSPACE</div>
+      <a class="nav-link" href="/admin/monitor"><span class="nav-icon" aria-hidden="true">◷</span>Overview<span class="nav-live">LIVE</span></a>
+      <a id="usage-nav" class="nav-link" href="/admin/usage" hidden><span class="nav-icon" aria-hidden="true">▥</span>Usage<span class="nav-live">HISTORY</span></a>
+      <div class="nav-label">CONFIGURATION</div>
+      <a class="nav-link active" href="#channels" data-view="channels" aria-current="page"><span class="nav-icon" aria-hidden="true">⊞</span>Channels<span id="nav-channel-count" class="nav-count">—</span></a>
+      <a class="nav-link" href="#models" data-view="models"><span class="nav-icon" aria-hidden="true">⑂</span>Model routing<span id="nav-model-count" class="nav-count">—</span></a>
+      <a class="nav-link" href="#compact" data-view="compact"><span class="nav-icon" aria-hidden="true">⇥</span>Compaction</a>
+      <a class="nav-link" href="#aliases" data-view="aliases"><span class="nav-icon" aria-hidden="true">↗</span>Aliases</a>
+      <div class="nav-label">SYSTEM</div>
+      <a class="nav-link" href="#environment" data-view="environment"><span class="nav-icon" aria-hidden="true">⚙︎</span>Environment</a>
+      <a class="nav-link" href="#runtime" data-view="runtime"><span class="nav-icon" aria-hidden="true">≡</span>Runtime</a>
+    </nav>
+    <div class="sidebar-footer"><span class="sidebar-dot"></span><div>Responses API proxy<small>Configuration & observability</small></div><span class="footer-version">v1</span></div>
+  </aside>
 
-  <main class="content-grid">
-    <section class="config-column">
-      <div class="section">
-        <div class="section-header">Providers</div>
-        <div class="section-body">
-          <h3 class="subsection-title">Primary Provider (env)</h3>
-          <table id="primary-table"><thead><tr><th>Key</th><th>Value</th><th>Secret</th></tr></thead><tbody></tbody></table>
-          <div class="subsection-heading">
-            <h3>Fallback Providers</h3>
-            <button id="btn-add-fallback" type="button">+ Add Fallback</button>
+  <div class="app-main">
+    <header class="topbar">
+      <div class="breadcrumb">Workspace <span>/</span> <strong id="page-breadcrumb">Channels</strong></div>
+      <div class="topbar-status"><span id="topbar-runtime-version" class="badge">Runtime —</span><span id="topbar-active-requests" class="badge">Active —</span></div>
+    </header>
+
+    <main id="main-content" class="content-grid" tabindex="-1">
+      <div class="page-heading">
+        <div class="page-heading-copy"><div class="eyebrow">GATEWAY CONFIGURATION</div><h1 id="page-title">Channels</h1><p id="page-description">Connect your providers. Build a resilient gateway.</p></div>
+        <div class="topbar-actions btn-row"><button id="btn-validate" type="button"><span aria-hidden="true">✓</span> Validate</button><button id="btn-save" type="button" class="primary"><span aria-hidden="true">↥</span> Save changes</button></div>
+      </div>
+
+      <div class="connection-bar"><div id="instance-summary" class="meta-row">Loading instance…</div><div id="status" class="notice notice-info" role="status" aria-live="polite">Connecting…</div><span id="dirty-badge" class="badge badge-ok" style="display:none">Unsaved changes</span></div>
+      <div class="feedback-stack" aria-live="polite"><div id="restart-notice" style="display:none"></div><div id="validation-result"></div><div id="action-result"></div></div>
+
+      <section class="summary-grid" aria-label="Draft configuration overview">
+        <a class="summary-card" href="#channels"><div class="summary-label">Provider channels <span aria-hidden="true">↗</span></div><div id="summary-channels" class="summary-value">—</div><div class="summary-note">Connected upstreams</div></a>
+        <a class="summary-card" href="#models"><div class="summary-label">Model routes <span aria-hidden="true">⑂</span></div><div id="summary-models" class="summary-value">—</div><div class="summary-note">Ordered fallback chains</div></a>
+        <a class="summary-card" href="#aliases"><div class="summary-label">Model aliases <span aria-hidden="true">↗</span></div><div id="summary-aliases" class="summary-value">—</div><div class="summary-note">Client-facing model names</div></a>
+        <a class="summary-card summary-featured" href="#models"><div class="summary-label">Default model <span aria-hidden="true">✳</span></div><div id="summary-default" class="summary-value summary-model">—</div><div class="summary-note">Used when no model is specified</div></a>
+      </section>
+
+      <div class="config-column">
+        <section id="channels" class="config-view" aria-labelledby="channels-title">
+          <div class="section-toolbar"><div><h2 id="channels-title">Provider directory <span id="channel-count" class="count-badge">0</span></h2><p>Credentials and connection settings for each upstream.</p></div><div class="toolbar-actions"><label class="search-field"><span aria-hidden="true">⌕</span><input id="channel-search" type="search" placeholder="Search channels…" aria-label="Search channels"></label><button id="btn-add-channel" type="button" class="primary">+ Add channel</button></div></div>
+          <div class="section table-panel"><table id="channels-table"><caption class="sr-only">Provider channel configuration</caption><thead><tr><th>ID</th><th>Name</th><th>Base URL</th><th>API Key</th><th>Breaker</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
+          <div id="channel-search-empty" class="empty-state" hidden>No channels match your search.</div>
+        </section>
+
+        <section id="models" class="config-view" aria-labelledby="models-title" hidden>
+          <div class="section-toolbar"><div><h2 id="models-title">Model routing</h2><p>Drag the ⠿ handle to set fallback priority. Changes apply when saved.</p></div><button id="btn-add-model-route" type="button" class="primary">+ Add route</button></div>
+          <div class="default-model-panel"><div><label for="default-model-input">Default model</label><p>The starting point for requests without a model.</p></div><input id="default-model-input" type="text" autocomplete="off" placeholder="Canonical model or alias"></div>
+          <div id="model-routes-list"></div>
+        </section>
+
+        <section id="compact" class="config-view" aria-labelledby="compact-title" hidden>
+          <div class="section-toolbar"><div><h2 id="compact-title">Context compaction</h2><p>Independent fallback routes for compact v1 and remote compaction v2.</p></div><div class="compact-heading-actions"><span id="compact-detecting" class="compact-detecting" role="status" aria-live="polite" hidden>Detecting…</span><button id="btn-detect-compact" type="button">↻ Detect support</button></div></div>
+          <div id="compact-detection-summary" class="compact-detection-summary" role="status" aria-live="polite" hidden></div>
+          <div id="compact-detection-unavailable" class="compact-detection-unavailable" role="status" aria-live="polite" hidden>Detection unavailable.</div>
+          <div class="compact-route-panel">
+            <div class="compact-intro"><div><h3>Compact routing</h3><p>Keep compaction traffic on its own set of providers.</p></div><label class="breaker-toggle compact-enable" for="compact-enabled"><input id="compact-enabled" type="checkbox" role="switch">Enable compact endpoint</label></div>
+            <div id="compact-route-editor" hidden>
+              <div class="field-group compact-model-field"><label for="compact-model-input">Compact v1 model</label><input id="compact-model-input" type="text" list="compact-model-options" autocomplete="off"><datalist id="compact-model-options"></datalist><div class="field-helper">Canonical model or alias for v1. Remote compaction v2 follows the conversation model.</div></div>
+              <div class="compact-channel-pickers">
+                <div class="compact-channel-group" role="group" aria-labelledby="compact-v1-channel-label"><div id="compact-v1-channel-label" class="compact-channel-label"><span class="protocol-tag">V1</span> Compact endpoint <code>/responses/compact</code></div><div id="compact-channel-picker"></div></div>
+                <div class="compact-channel-group" role="group" aria-labelledby="compact-v2-channel-label"><div id="compact-v2-channel-label" class="compact-channel-label"><span class="protocol-tag">V2</span> Remote compaction <code>compaction_trigger</code></div><div id="compact-v2-channel-picker"></div></div>
+              </div>
+            </div>
           </div>
-          <table id="fallback-table"><thead><tr><th>Move</th><th>Name</th><th>Base URL</th><th>Key Mode</th><th>Key Env</th><th>No cooldown</th><th>Configured</th><th>Actions</th></tr></thead><tbody></tbody></table>
-        </div>
+        </section>
+
+        <section id="aliases" class="config-view" aria-labelledby="aliases-title" hidden>
+          <div class="section-toolbar"><div><h2 id="aliases-title">Model aliases</h2><p>Friendly names for your clients, canonical models for your routes.</p></div><button id="btn-add-alias" type="button" class="primary">+ Add alias</button></div><div id="aliases-list"></div>
+        </section>
+
+        <section id="environment" class="config-view" aria-labelledby="environment-title" hidden>
+          <div class="section-toolbar"><div><h2 id="environment-title">Environment settings</h2><p>Listener, timeouts, compatibility, and prompt caching.</p></div><label class="search-field"><span aria-hidden="true">⌕</span><input id="env-search" type="search" placeholder="Find a setting…" aria-label="Search environment settings"></label></div>
+          <div class="section table-panel"><table id="primary-table"><thead><tr><th>Configuration key</th><th>Value</th><th>Secret</th></tr></thead><tbody></tbody></table><div id="env-search-empty" class="empty-state" hidden>No settings match your search.</div></div>
+        </section>
+
+        <section id="runtime" class="config-view" aria-labelledby="runtime-title" hidden>
+          <div class="section-toolbar"><div><h2 id="runtime-title">Runtime snapshot</h2><p>Loaded configuration and instance controls.</p></div></div>
+          <div class="overview-bar-panel"><div class="overview-bar-items"><div class="overview-bar-item"><label for="ov-version">Runtime version</label><input id="ov-version" readonly></div><div class="overview-bar-item"><label for="ov-restart">Restart required</label><input id="ov-restart" readonly></div><div id="ov-instance-info" class="overview-bar-extra"></div></div></div>
+          <div class="section table-panel"><table id="runtime-table"><thead><tr><th>Runtime / Compatibility</th><th>Loaded value</th></tr></thead><tbody></tbody></table></div>
+        </section>
       </div>
 
-      <div class="section">
-        <div class="section-header">Model Mappings</div>
-        <div class="section-body">
-          <div id="model-mappings-list"></div>
-          <div class="btn-row section-footer">
-            <button id="btn-add-mapping">+ Add Mapping</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="section">
-        <div class="section-header">Runtime / Compatibility</div>
-        <div class="section-body">
-          <table id="runtime-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody></tbody></table>
-        </div>
-      </div>
-    </section>
-
-    <aside class="status-column">
-      <div class="status-panel">
-        <div class="panel-title">Overview</div>
-        <div class="panel-body">
-          <div class="field-group"><label>Runtime Version</label><input id="ov-version" readonly></div>
-          <div class="field-group"><label>Restart Required Fields</label><input id="ov-restart" readonly></div>
-          <div id="ov-instance-info"></div>
-        </div>
-      </div>
-    </aside>
-  </main>
+      <footer class="workspace-footer"><span>Changes apply to this instance when saved.</span><div class="runtime-actions"><button id="btn-reload" type="button" class="quiet">↻ Reload from disk</button><span class="footer-divider"></span><button id="btn-rollback" type="button" class="danger quiet">↶ Rollback</button></div></footer>
+    </main>
+  </div>
 </div>
 <script src="/admin/assets/admin.js"></script>
 </body>

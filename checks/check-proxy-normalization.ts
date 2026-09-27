@@ -53,8 +53,7 @@ async function waitForHealthy(url: string) {
 
 async function main() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'responses-proxy-check-'));
-  const fallbackConfigPath = path.join(tempDir, 'fallback.empty.json');
-  await writeFile(fallbackConfigPath, JSON.stringify({ fallback_api_config: [] }, null, 2), 'utf8');
+  const fallbackConfigPath = path.join(tempDir, 'fallback.json');
 
   const capturedRequestBodies: JsonValue[] = [];
 
@@ -90,6 +89,17 @@ async function main() {
 
   const upstreamBaseUrl = `http://127.0.0.1:${upstreamAddress.port}`;
   const proxyPort = upstreamAddress.port + 1;
+
+  await writeFile(fallbackConfigPath, JSON.stringify({
+    default_model: 'mock-model',
+    channels: [
+      { id: 'mock-primary', name: 'mock-primary', base_url: upstreamBaseUrl, api_key: 'mock-key' },
+    ],
+    models: {
+      'mock-model': { channel_ids: ['mock-primary'] },
+    },
+  }, null, 2), 'utf8');
+
   const tsxCliPath = require.resolve('tsx/cli');
 
   const proxy = spawn(process.execPath, [tsxCliPath, 'src/json-proxy.ts'], {
@@ -99,9 +109,6 @@ async function main() {
         HOST: '127.0.0.1',
         PORT: String(proxyPort),
         INSTANCE_NAME: 'responses-proxy-regression-check',
-        PRIMARY_PROVIDER_NAME: 'mock-primary',
-        PRIMARY_PROVIDER_BASE_URL: upstreamBaseUrl,
-        PRIMARY_PROVIDER_API_KEY: 'mock-key',
         PROXY_PROMPT_CACHE_RETENTION: '24h',
         PROXY_PROMPT_CACHE_KEY: 'proxy-default-cache-key',
         PROXY_CLEAR_DEVELOPER_CONTENT: '1',

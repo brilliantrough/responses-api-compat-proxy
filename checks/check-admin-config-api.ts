@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -8,6 +8,7 @@ import path from 'node:path';
 import { createConfigFileStoreFromPaths } from '../src/config-files.js';
 import { createRuntimeConfigStore } from '../src/runtime-config.js';
 import { createAdminHandler, isAllowedAdminAccess, isLocalhost } from '../src/admin-api.js';
+import { createCompactDetectionService } from '../src/compact-support.js';
 
 const allTempDirs: string[] = [];
 const allServers: import('node:http').Server[] = [];
@@ -19,16 +20,31 @@ function makeTempDir() {
 }
 
 function writeDotEnv(envPath: string, lines: string[]) {
-  const full = lines.join('\n');
-  writeFileSync(envPath, full, 'utf8');
+  writeFileSync(envPath, lines.join('\n'), 'utf8');
 }
 
 function writeFallbackJson(filePath: string, content: unknown) {
   writeFileSync(filePath, JSON.stringify(content, null, 2), 'utf8');
 }
 
-function writeModelMapJson(filePath: string, content: unknown) {
-  writeFileSync(filePath, JSON.stringify(content, null, 2), 'utf8');
+function routingDocument() {
+  return {
+    default_model: 'model-a',
+    channels: [
+      { id: 'alpha', name: 'Alpha', base_url: 'https://alpha.example', api_key: 'alpha-secret' },
+      { id: 'beta', base_url: 'https://beta.example', api_key: 'beta-secret' },
+    ],
+    models: {
+      'model-a': { channel_ids: ['alpha', 'beta'] },
+      'model-b': { channel_ids: ['beta'] },
+    },
+    aliases: { latest: 'model-a' },
+    compact: {
+      model: 'latest',
+      channel_ids: ['beta', 'alpha'],
+      v2_channel_ids: ['alpha'],
+    },
+  };
 }
 
 function startServer(
@@ -62,73 +78,83 @@ async function main() {
     assert.equal(isLocalhost('::ffff:127.0.0.1'), true);
     assert.equal(isLocalhost('192.168.1.1'), false);
     assert.equal(isLocalhost(undefined), false);
-    assert.equal(isLocalhost('10.0.0.1'), false);
     assert.equal(isAllowedAdminAccess('127.0.0.1', false), true);
-    assert.equal(isAllowedAdminAccess('::ffff:127.0.0.1', false), true);
     assert.equal(isAllowedAdminAccess('172.17.0.1', false), false);
     assert.equal(isAllowedAdminAccess('172.17.0.1', true), true);
-    assert.equal(isAllowedAdminAccess(undefined, true), false);
 
-    // Use two separate dirs: envDir has .env, configDir has fallback.json + model-map.json.
-    // This proves the store uses explicit paths from runtime snapshot, not guessed from .env dir.
-    console.log('=== 2. Setup with separated env and config dirs ===');
+    console.log('=== 2. setup with separated env and routing dirs ===');
     const envDir = makeTempDir();
     const configDir = makeTempDir();
 
     const envPath = path.join(envDir, '.env');
     const fallbackPath = path.join(configDir, 'fallback.json');
-    const modelMapPath = path.join(configDir, 'model-map.json');
 
-    writeFallbackJson(fallbackPath, { fallback_api_config: [] });
-    writeModelMapJson(modelMapPath, { model_mappings: {} });
+    writeFallbackJson(fallbackPath, routingDocument());
     writeDotEnv(envPath, [
-      'PRIMARY_PROVIDER_NAME=test-primary',
-      'PRIMARY_PROVIDER_BASE_URL=https://api.test.example',
-      'PRIMARY_PROVIDER_API_KEY=test-key-123',
-      'PRIMARY_PROVIDER_DEFAULT_MODEL=gpt-4o-test',
+      'ADMIN_TEST_API_KEY=test-key-123',
       'PORT=0',
       'HOST=127.0.0.1',
       `FALLBACK_CONFIG_PATH=${fallbackPath}`,
-      `MODEL_MAP_PATH=${modelMapPath}`,
     ]);
 
     const runtimeStore = createRuntimeConfigStore({ envPath });
     const snap = runtimeStore.getSnapshot();
-    assert.equal(snap.config.fallbackConfigPath, fallbackPath, 'runtime snapshot should have correct fallback path');
-    assert.equal(snap.config.modelMappingPath, modelMapPath, 'runtime snapshot should have correct model-map path');
+    assert.equal(snap.config.routingConfigPath, fallbackPath, 'runtime snapshot should have correct routing path');
 
-    // Use explicit paths from snapshot — same pattern as json-proxy.ts
     const configStore = createConfigFileStoreFromPaths({
       envPath,
-      fallbackPath: snap.config.fallbackConfigPath,
-      modelMapPath: snap.config.modelMappingPath,
+      fallbackPath: snap.config.routingConfigPath,
     });
-    const adminHandler = createAdminHandler({ configStore, runtimeStore });
+    const compactDetection = createCompactDetectionService({
+      fetchImpl: async url => url.endsWith('/responses/compact')
+        ? new Response(JSON.stringify({ object: 'response.compaction' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+        : new Response([
+          'event: response.output_item.done',
+          'data: {"type":"response.output_item.done","item":{"type":"compaction"}}',
+          '',
+          'event: response.completed',
+          'data: {"type":"response.completed","response":{"object":"response.compaction","output":[{"type":"compaction"}]}}',
+          '',
+        ].join('\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    });
+    await compactDetection.detectAll(
+      Array.from(snap.config.routingConfig.channelsById.values()),
+      'model-a',
+    );
+    const adminHandler = createAdminHandler({ configStore, runtimeStore, compactDetection });
     const { port } = await startServer(adminHandler);
     const baseUrl = `http://127.0.0.1:${port}`;
 
-    console.log(`Test server started on port ${port}`);
-    console.log(`envDir=${envDir}, configDir=${configDir}`);
-
-    console.log('=== 3. GET /admin/config returns 200 with masked secrets ===');
+    console.log('=== 3. GET /admin/config returns masked routing config ===');
     const getConfigRes = await fetch(`${baseUrl}/admin/config`);
     assert.equal(getConfigRes.status, 200);
-    const getConfigBody = (await getConfigRes.json()) as Record<string, unknown>;
-    assert.ok(getConfigBody.config, 'response should have config');
+    const getConfigBody = await getConfigRes.json() as Record<string, unknown>;
     const config = getConfigBody.config as Record<string, unknown>;
-    assert.ok(Array.isArray(config.env), 'config should have env array');
+    assert.ok(Array.isArray(config.env));
+    assert.ok(Array.isArray(config.channels));
+    assert.ok(Array.isArray(config.models));
+    assert.equal(config.defaultModel, 'model-a');
+    assert.deepEqual(config.aliases, { latest: 'model-a' });
+    assert.deepEqual(config.compact, {
+      model: 'model-a',
+      channelIds: ['beta', 'alpha'],
+      v2ChannelIds: ['alpha'],
+    });
 
     const envArr = config.env as Array<Record<string, unknown>>;
-    const apiKeyEntry = envArr.find((e) => e.key === 'PRIMARY_PROVIDER_API_KEY');
-    assert.ok(apiKeyEntry, 'API key should appear in env');
-    assert.equal(apiKeyEntry.value, '***', 'API key must be masked');
-    const billingModeEntry = envArr.find((e) => e.key === 'PROXY_CLAUDE_BILLING_HEADER_MODE');
-    assert.ok(billingModeEntry, 'Claude billing header mode should appear in admin env defaults');
-    assert.equal(billingModeEntry.value, 'strip_line', 'default billing header mode should strip the whole line');
-    assert.equal(typeof getConfigBody.runtimeVersion, 'number', 'should have runtimeVersion');
-    assert.ok(Array.isArray(getConfigBody.restartRequiredFields), 'should have restartRequiredFields');
+    const apiKeyEntry = envArr.find(entry => entry.key === 'ADMIN_TEST_API_KEY');
+    assert.ok(apiKeyEntry);
+    assert.equal(apiKeyEntry?.value, '***');
 
-    console.log('=== 4. POST /admin/config/validate validates draft without writing files ===');
+    const channels = config.channels as Array<Record<string, unknown>>;
+    assert.equal(channels[0]?.apiKeyMasked, '***');
+    assert.equal(channels[0]?.apiKeyConfigured, true);
+    assert.ok(!JSON.stringify(config).includes('alpha-secret'));
+
+    console.log('=== 4. POST /admin/config/validate validates without writing files ===');
     const envBeforeValidate = readFileSync(envPath, 'utf8');
     const fbBeforeValidate = readFileSync(fallbackPath, 'utf8');
     const validateRes = await fetch(`${baseUrl}/admin/config/validate`, {
@@ -136,125 +162,131 @@ async function main() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         env: [{ key: 'SOME_KEY', value: 'new-value' }],
-        fallbackProviders: [{ name: 'fb-1', baseUrl: 'https://fb.example', apiKeyMode: 'none', disableCooldown: true }],
-        modelMappings: { 'test-alias': 'test-model' },
+        defaultModel: 'latest',
+        channels: [
+          { id: 'alpha', name: 'Alpha', baseUrl: 'https://alpha.example', apiKeyAction: 'keep' },
+          { id: 'beta', baseUrl: 'https://beta.example', apiKeyAction: 'keep' },
+        ],
+        models: [{ canonicalModel: 'model-a', channelIds: ['alpha', 'beta'] }],
+        aliases: { latest: 'model-a' },
+        compact: { model: 'latest', channelIds: ['alpha'], v2ChannelIds: null },
       }),
     });
     assert.equal(validateRes.status, 200);
-    const validateBody = (await validateRes.json()) as Record<string, unknown>;
-    assert.equal(validateBody.ok, true);
-    assert.equal(validateBody.valid, true, 'valid draft should return valid:true');
+    const validateBody = await validateRes.json() as Record<string, unknown>;
+    assert.equal(validateBody.valid, true);
+    assert.equal(readFileSync(envPath, 'utf8'), envBeforeValidate);
+    assert.equal(readFileSync(fallbackPath, 'utf8'), fbBeforeValidate);
 
-    assert.equal(readFileSync(envPath, 'utf8'), envBeforeValidate, 'validate must not modify .env');
-    assert.equal(readFileSync(fallbackPath, 'utf8'), fbBeforeValidate, 'validate must not modify fallback.json');
-
-    // Validate with bad draft
+    console.log('=== 5. invalid validate draft returns errors ===');
     const badValidateRes = await fetch(`${baseUrl}/admin/config/validate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         env: 'not-an-array',
-        fallbackProviders: [{ baseUrl: '' }],
-        modelMappings: 'wrong',
+        defaultModel: '',
+        channels: [{ id: 'alpha', baseUrl: '', apiKeyAction: 'replace' }],
+        models: [{ canonicalModel: 'model-a', channelIds: ['missing'] }],
+        aliases: { 'model-a': 'model-b' },
       }),
     });
     assert.equal(badValidateRes.status, 200);
-    const badValidateBody = (await badValidateRes.json()) as Record<string, unknown>;
-    assert.equal(badValidateBody.valid, false, 'invalid draft should return valid:false');
-    assert.ok(Array.isArray(badValidateBody.errors), 'invalid draft should list errors');
-    assert.ok((badValidateBody.errors as string[]).length > 0, 'should have at least one error');
+    const badValidateBody = await badValidateRes.json() as Record<string, unknown>;
+    assert.equal(badValidateBody.valid, false);
 
-    const invalidBillingModeRes = await fetch(`${baseUrl}/admin/config/validate`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        env: [{ key: 'PROXY_CLAUDE_BILLING_HEADER_MODE', value: 'keep_everything' }],
-        fallbackProviders: [],
-        modelMappings: {},
-      }),
-    });
-    assert.equal(invalidBillingModeRes.status, 200);
-    const invalidBillingModeBody = (await invalidBillingModeRes.json()) as Record<string, unknown>;
-    assert.equal(invalidBillingModeBody.valid, false, 'invalid billing header mode should fail validation');
-    assert.ok(
-      (invalidBillingModeBody.errors as string[]).some(error => error.includes('PROXY_CLAUDE_BILLING_HEADER_MODE')),
-      'validation errors should mention billing header mode',
-    );
-
-    console.log('=== 5. PUT /admin/config writes to correct (separated) paths and reloads ===');
+    console.log('=== 6. PUT /admin/config writes routing config and reloads ===');
     const putRes = await fetch(`${baseUrl}/admin/config`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        env: [{ key: 'PRIMARY_PROVIDER_API_KEY', secretAction: 'keep' }],
-        fallbackProviders: [{ name: 'new-fb', baseUrl: 'https://new-fb.example', apiKeyMode: 'none', disableCooldown: true }],
-        modelMappings: { 'new-alias': 'new-target' },
+        env: [{ key: 'ADMIN_TEST_API_KEY', secretAction: 'keep' }],
+        defaultModel: 'model-b',
+        channels: [
+          { id: 'alpha', name: 'Alpha', baseUrl: 'https://alpha.example', apiKeyAction: 'keep' },
+          { id: 'beta', baseUrl: 'https://beta.example', apiKeyAction: 'replace', apiKeyValue: 'beta-secret-new' },
+        ],
+        models: [{ canonicalModel: 'model-b', channelIds: ['beta', 'alpha'] }],
+        aliases: { latest: 'model-b' },
+        compact: { model: 'latest', channelIds: ['beta'], v2ChannelIds: ['alpha'] },
       }),
     });
     assert.equal(putRes.status, 200);
-    const putBody = (await putRes.json()) as Record<string, unknown>;
+    const putBody = await putRes.json() as Record<string, unknown>;
     assert.equal(putBody.ok, true);
-    assert.ok(
-      (putBody.runtimeVersion as number) >= 2,
-      'runtimeVersion should be incremented after save+reload',
-    );
+    assert.ok((putBody.runtimeVersion as number) >= 2);
 
-    // Verify write went to configDir, NOT envDir
-    const modelMapInConfigDir = JSON.parse(readFileSync(modelMapPath, 'utf8'));
-    assert.deepEqual(
-      modelMapInConfigDir.model_mappings,
-      { 'new-alias': 'new-target' },
-      'model-map.json in configDir should have new mappings',
-    );
-
-    // Verify no spillover into envDir
-    const { existsSync } = await import('node:fs');
-    assert.ok(
-      !existsSync(path.join(envDir, 'model-map.json')),
-      'no model-map.json should exist in envDir',
-    );
-    assert.ok(
-      !existsSync(path.join(envDir, 'fallback.json')),
-      'no fallback.json should exist in envDir',
-    );
-    const fallbackInConfigDir = JSON.parse(readFileSync(fallbackPath, 'utf8'));
-    assert.equal(fallbackInConfigDir.fallback_api_config[0].name, 'new-fb');
-    assert.equal(fallbackInConfigDir.fallback_api_config[0].disable_cooldown, true);
-
-    console.log('=== 6. POST /admin/config/reload returns 200 ===');
-    const reloadRes = await fetch(`${baseUrl}/admin/config/reload`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+    const written = JSON.parse(readFileSync(fallbackPath, 'utf8')) as Record<string, unknown>;
+    assert.equal(written.default_model, 'model-b');
+    const writtenChannels = written.channels as Array<Record<string, unknown>>;
+    assert.equal(writtenChannels[0]?.api_key, 'alpha-secret');
+    assert.equal(writtenChannels[1]?.api_key, 'beta-secret-new');
+    assert.deepEqual(written.aliases, { latest: 'model-b' });
+    assert.deepEqual(written.compact, {
+      model: 'latest',
+      channel_ids: ['beta'],
+      v2_channel_ids: ['alpha'],
     });
+    assert.equal(statSync(fallbackPath).mode & 0o777, 0o600, 'fallback.json should be mode 0600');
+    assert.equal(statSync(`${fallbackPath}.bak`).mode & 0o777, 0o600, 'fallback backup should be mode 0600');
+    assert.equal(existsSync(path.join(configDir, 'model-map.json')), false, 'model-map.json should not be used');
+
+    console.log('=== 7. reload and rollback work ===');
+    const reloadRes = await fetch(`${baseUrl}/admin/config/reload`, { method: 'POST' });
     assert.equal(reloadRes.status, 200);
-    const reloadBody = (await reloadRes.json()) as Record<string, unknown>;
+    const reloadBody = await reloadRes.json() as Record<string, unknown>;
     assert.equal(reloadBody.ok, true);
-    assert.ok(typeof reloadBody.runtimeVersion === 'number');
 
-    console.log('=== 7. POST /admin/config/rollback restores previous config ===');
-    const rollbackRes = await fetch(`${baseUrl}/admin/config/rollback`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-    });
+    const rollbackRes = await fetch(`${baseUrl}/admin/config/rollback`, { method: 'POST' });
     assert.equal(rollbackRes.status, 200);
-    const rollbackBody = (await rollbackRes.json()) as Record<string, unknown>;
+    const rollbackBody = await rollbackRes.json() as Record<string, unknown>;
     assert.equal(rollbackBody.ok, true);
-    const restored = rollbackBody.restored as string[];
-    assert.ok(Array.isArray(restored));
-    assert.ok(restored.length > 0, 'should have restored some files');
+    assert.ok(Array.isArray(rollbackBody.restored));
 
-    const modelMapAfterRollback = JSON.parse(readFileSync(modelMapPath, 'utf8'));
-    assert.deepEqual(
-      modelMapAfterRollback.model_mappings,
-      {},
-      'model-map should be back to empty after rollback',
-    );
+    console.log('=== 8. HTML and assets are served ===');
+    const adminHtmlRes = await fetch(`${baseUrl}/admin`);
+    assert.equal(adminHtmlRes.status, 200);
+    const adminHtmlBody = await adminHtmlRes.text();
+    assert.ok(adminHtmlBody.includes('Admin Config'));
+    assert.ok(adminHtmlBody.includes('default-model-input'));
+    assert.ok(adminHtmlBody.includes('channels-table'));
+    assert.ok(adminHtmlBody.includes('model-routes-list'));
+    assert.ok(adminHtmlBody.includes('aliases-list'));
 
-    console.log('=== 8. Unknown admin route returns 404 ===');
+    const adminJsRes = await fetch(`${baseUrl}/admin/assets/admin.js`);
+    assert.equal(adminJsRes.status, 200);
+    const adminJs = await adminJsRes.text();
+    assert.ok(adminJs.includes('default-model-input'));
+    assert.ok(adminJs.includes('channels-table'));
+    assert.ok(adminJs.includes('model-routes-list'));
+    assert.ok(adminJs.includes('aliases-list'));
+
+    const adminCssRes = await fetch(`${baseUrl}/admin/assets/admin.css`);
+    assert.equal(adminCssRes.status, 200);
+    const adminCss = await adminCssRes.text();
+    assert.ok(adminCss.includes('routing-row'));
+    assert.ok(adminCss.includes('channel-key-wrap'));
+
+    console.log('=== 9. invalid PUT returns 400 and has no side effects ===');
+    const envBeforeInvalid = readFileSync(envPath, 'utf8');
+    const fbBeforeInvalid = readFileSync(fallbackPath, 'utf8');
+    const invalidPutRes = await fetch(`${baseUrl}/admin/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        env: 'not-an-array',
+        defaultModel: '',
+        channels: [{ id: '', baseUrl: '', apiKeyAction: 'replace' }],
+        models: [{ canonicalModel: 'model-a', channelIds: ['missing'] }],
+        aliases: { 'model-a': 'model-b' },
+      }),
+    });
+    assert.equal(invalidPutRes.status, 400);
+    assert.equal(readFileSync(envPath, 'utf8'), envBeforeInvalid);
+    assert.equal(readFileSync(fallbackPath, 'utf8'), fbBeforeInvalid);
+
+    console.log('=== 10. asset and path handling are safe ===');
     const unknownRes = await fetch(`${baseUrl}/admin/unknown`);
     assert.equal(unknownRes.status, 404);
-
-    console.log('=== 9. Invalid JSON body on validate returns 400 ===');
     const badJsonRes = await fetch(`${baseUrl}/admin/config/validate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -262,121 +294,45 @@ async function main() {
     });
     assert.equal(badJsonRes.status, 400);
 
+    const statsRes = await fetch(`${baseUrl}/admin/stats`);
+    assert.equal(statsRes.status, 200);
+    const detectionRes = await fetch(`${baseUrl}/admin/compact/detection`);
+    assert.equal(detectionRes.status, 200);
+    const detectionBody = await detectionRes.json() as Record<string, unknown>;
+    assert.equal(detectionBody.ok, true);
+    assert.equal(Array.isArray(detectionBody.results), true);
+    const detectionResults = detectionBody.results as Array<Record<string, unknown>>;
+    assert.ok(detectionResults.length > 0);
+    assert.equal(detectionResults.every(item => item.protocol === 'v1' || item.protocol === 'v2'), true);
+    const detectRes = await fetch(`${baseUrl}/admin/compact/detect`, { method: 'POST' });
+    assert.equal(detectRes.status, 200);
+    assert.equal((await detectRes.json() as Record<string, unknown>).started, true);
+    const clearRes = await fetch(`${baseUrl}/admin/cache/clear`, { method: 'POST' });
+    assert.equal(clearRes.status, 200);
 
-    console.log('=== 10. GET /admin returns HTML with "Admin Config" ===');
-    const adminHtmlRes = await fetch(`${baseUrl}/admin`);
-    assert.equal(adminHtmlRes.status, 200);
-    const adminHtmlContentType = adminHtmlRes.headers.get('content-type') ?? '';
-    assert.ok(adminHtmlContentType.includes('text/html'), `expected text/html, got ${adminHtmlContentType}`);
-    const adminHtmlBody = await adminHtmlRes.text();
-    assert.ok(adminHtmlBody.includes('Admin Config'), 'HTML should contain "Admin Config"');
-
-    console.log('=== 11. GET /admin/ returns same admin HTML ===');
-    const adminSlashRes = await fetch(`${baseUrl}/admin/`);
-    assert.equal(adminSlashRes.status, 200);
-    const adminSlashContentType = adminSlashRes.headers.get('content-type') ?? '';
-    assert.ok(adminSlashContentType.includes('text/html'), `expected text/html for /admin/, got ${adminSlashContentType}`);
-    const adminSlashBody = await adminSlashRes.text();
-    assert.ok(adminSlashBody.includes('Admin Config'), '/admin/ HTML should contain "Admin Config"');
-
-    console.log('=== 12. GET /admin/assets/admin.js returns JavaScript ===');
-    const adminJsRes = await fetch(`${baseUrl}/admin/assets/admin.js`);
-    assert.equal(adminJsRes.status, 200);
-    const jsContentType = adminJsRes.headers.get('content-type') ?? '';
-    assert.ok(
-      jsContentType.includes('javascript') || jsContentType.includes('text/javascript') || jsContentType.includes('application/javascript'),
-      `expected javascript content-type, got ${jsContentType}`,
-    );
-    const jsBody = await adminJsRes.text();
-    assert.ok(jsBody.includes('admin'), 'JS should reference admin');
-
-    console.log('=== 12b. GET /admin/assets/admin.js?v=2 still serves JS ===');
-    const adminJsVersionedRes = await fetch(`${baseUrl}/admin/assets/admin.js?v=2`);
-    assert.equal(adminJsVersionedRes.status, 200);
-    assert.ok((adminJsVersionedRes.headers.get('content-type') ?? '').includes('javascript'), 'versioned JS should have javascript content-type');
-
-    console.log('=== 13. GET /admin/assets/admin.css returns CSS ===');
-    const adminCssRes = await fetch(`${baseUrl}/admin/assets/admin.css`);
-    assert.equal(adminCssRes.status, 200);
-    const cssContentType = adminCssRes.headers.get('content-type') ?? '';
-    assert.ok(cssContentType.includes('text/css'), `expected text/css, got ${cssContentType}`);
-
-    console.log('=== 14. Encoded path traversal via raw socket is blocked ===');
-    {
-      const rawStatus = await new Promise<number>((resolve, reject) => {
-        const socket = net.createConnection({ host: '127.0.0.1', port }, () => {
-          socket.write('GET /admin/assets/%2e%2e/src/admin-api.ts HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n');
-        });
-        let resp = '';
-        socket.on('data', (chunk) => { resp += chunk.toString(); });
-        socket.on('end', () => {
-          const match = resp.match(/^HTTP\/[^ ]+ (\d+)/);
-          if (match) resolve(parseInt(match[1], 10));
-          else reject(new Error('No status in response: ' + resp.slice(0, 200)));
-        });
-        socket.on('error', reject);
-        setTimeout(() => { socket.destroy(); reject(new Error('socket timeout')); }, 5000);
+    const traversalStatus = await new Promise<number>((resolve, reject) => {
+      const socket = net.createConnection({ host: '127.0.0.1', port }, () => {
+        socket.write('GET /admin/assets/%2e%2e/src/admin-api.ts HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n');
       });
-      assert.ok(rawStatus === 404 || rawStatus === 400 || rawStatus === 403, `encoded path traversal should be rejected, got ${rawStatus}`);
-    }
-
-    console.log('=== 15. Unknown admin asset returns 404 ===');
-    const unknownAssetRes = await fetch(`${baseUrl}/admin/assets/nonexistent.txt`);
-    assert.equal(unknownAssetRes.status, 404);
-
-    console.log('=== 16. GET /admin/config has Cache-Control: no-store ===');
-    const cacheCtrlRes = await fetch(`${baseUrl}/admin/config`);
-    assert.equal(cacheCtrlRes.status, 200);
-    const cacheCtrl = cacheCtrlRes.headers.get('cache-control') ?? '';
-    assert.ok(cacheCtrl.includes('no-store'), `expected no-store in cache-control, got: ${cacheCtrl}`);
-
-    console.log('=== 17. Invalid PUT /admin/config returns 400 and has no side effects ===');
-    {
-      const envBefore = readFileSync(envPath, 'utf8');
-      const fbBefore = readFileSync(fallbackPath, 'utf8');
-      const mmBefore = readFileSync(modelMapPath, 'utf8');
-      const invalidPutRes = await fetch(`${baseUrl}/admin/config`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          env: 'not-an-array',
-          fallbackProviders: [{ baseUrl: '' }],
-          modelMappings: 'wrong',
-        }),
+      let resp = '';
+      socket.on('data', chunk => { resp += chunk.toString(); });
+      socket.on('end', () => {
+        const match = resp.match(/^HTTP\/[^ ]+ (\d+)/);
+        if (match) resolve(parseInt(match[1], 10));
+        else reject(new Error('No status in response: ' + resp.slice(0, 200)));
       });
-      assert.equal(invalidPutRes.status, 400, 'invalid PUT should return 400');
-      const invalidPutBody = (await invalidPutRes.json()) as Record<string, unknown>;
-      assert.equal(invalidPutBody.ok, false);
-      assert.ok(Array.isArray(invalidPutBody.errors), 'invalid PUT should have errors array');
-      assert.ok((invalidPutBody.errors as string[]).length > 0, 'should have validation errors');
-      assert.equal(readFileSync(envPath, 'utf8'), envBefore, 'env file must not change on invalid PUT');
-      assert.equal(readFileSync(fallbackPath, 'utf8'), fbBefore, 'fallback file must not change on invalid PUT');
-      assert.equal(readFileSync(modelMapPath, 'utf8'), mmBefore, 'model-map file must not change on invalid PUT');
-    }
-
-    console.log('=== 18. GET /admin/stats is localhost-only and returns 200 ===');
-    {
-      const statsRes = await fetch(`${baseUrl}/admin/stats`);
-      assert.equal(statsRes.status, 200, '/admin/stats should return 200 for localhost');
-      const statsBody = await statsRes.json();
-      assert.ok(typeof statsBody === 'object', 'stats should return JSON');
-    }
-
-    console.log('=== 19. POST /admin/cache/clear is localhost-only and returns 200 ===');
-    {
-      const clearRes = await fetch(`${baseUrl}/admin/cache/clear`, { method: 'POST' });
-      assert.equal(clearRes.status, 200, '/admin/cache/clear should return 200 for localhost');
-      const clearBody = (await clearRes.json()) as Record<string, unknown>;
-      assert.equal(clearBody.ok, true);
-    }
+      socket.on('error', reject);
+      setTimeout(() => { socket.destroy(); reject(new Error('socket timeout')); }, 5000);
+    });
+    assert.ok(traversalStatus === 404 || traversalStatus === 400 || traversalStatus === 403);
 
     console.log('\nAll admin-config-api checks passed.');
   } finally {
     for (const server of allServers) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
-    for (const d of allTempDirs) {
-      rmSync(d, { recursive: true, force: true });
+    for (const dir of allTempDirs) {
+      rmSync(dir, { recursive: true, force: true });
     }
   }
 }

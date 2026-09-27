@@ -4,9 +4,22 @@ node_modules/
 dist/
 logs/
 captures/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 sse-failures/
 .superpowers/
 .opencode/
 .worktrees/
 instances/proxy-*/
 docs/superpowers/
+docs/output/
+# 本地部署手册与工作区（不入库）
+DEPLOY.local.md
+envs.sh
+.omo/
+__pycache__/
+length,context.log
+length,context.pdf
+docs/project_memory/journal.sdoc
+docs/project_memory/deployment-redline.md

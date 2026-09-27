@@ -68,7 +68,6 @@ async function waitForHealthy(url: string) {
 async function captureUpstreamBody(mode?: 'strip_cch') {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'responses-proxy-billing-header-'));
   const fallbackConfigPath = path.join(tempDir, 'fallback.empty.json');
-  await writeFile(fallbackConfigPath, JSON.stringify({ fallback_api_config: [] }, null, 2), 'utf8');
 
   const capturedRequestBodies: JsonRecord[] = [];
   const upstream = createServer(async (req, res) => {
@@ -101,15 +100,28 @@ async function captureUpstreamBody(mode?: 'strip_cch') {
     throw new Error('Failed to resolve mock upstream address');
   }
 
+  await writeFile(fallbackConfigPath, JSON.stringify({
+    default_model: 'mock-model',
+    channels: [
+      { id: 'primary', name: 'mock-primary', base_url: `http://127.0.0.1:${upstreamAddress.port}`, api_key: 'mock-key' },
+    ],
+    models: {
+      'mock-model': { channel_ids: ['primary'] },
+    },
+    aliases: {},
+  }, null, 2), 'utf8');
+
   const proxyPort = await getFreePort();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOST: '127.0.0.1',
     PORT: String(proxyPort),
     INSTANCE_NAME: `responses-proxy-billing-header-${mode ?? 'default'}`,
-    PRIMARY_PROVIDER_NAME: 'mock-primary',
-    PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${upstreamAddress.port}`,
-    PRIMARY_PROVIDER_API_KEY: 'mock-key',
+    PRIMARY_PROVIDER_NAME: undefined,
+    PRIMARY_PROVIDER_BASE_URL: undefined,
+    PRIMARY_PROVIDER_API_KEY: undefined,
+    PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+    MODEL_MAP_PATH: undefined,
     FALLBACK_CONFIG_PATH: fallbackConfigPath,
     PROXY_CLEAR_DEVELOPER_CONTENT: '0',
     PROXY_CLEAR_SYSTEM_CONTENT: '0',

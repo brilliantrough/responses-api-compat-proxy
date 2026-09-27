@@ -2,67 +2,50 @@
 
 [English](./README.md) | [中文](./docs/zh/README.md)
 
-A TypeScript compatibility proxy for working with upstream providers that expose OpenAI-style `/v1/responses` and `/v1/models` endpoints.
+A TypeScript compatibility proxy for upstream providers exposing OpenAI-style `/v1/responses` and `/v1/models` endpoints.
 
-It is designed for the real integration problems that show up after "OpenAI-compatible" stops being truly uniform: request normalization, JSON and SSE response handling, fallback routing, stream normalization, gateway-added attribution text, and runtime operations. It is not an official OpenAI project.
-
-Use it when direct upstream integration becomes painful because providers differ just enough to break assumptions around request shape, SSE event shape, timeout behavior, or day-2 operations like config edits and provider failover.
-
-## What It Helps With
-
-- Proxy `POST /v1/responses` for JSON and streaming clients.
-- Proxy `GET /v1/models` with optional model alias exposure.
-- Normalize OpenAI Responses-style requests before forwarding upstream.
-- Strip Claude Code / Anthropic billing header text or dynamic `cch=...` fields from normalized prompt text so cacheable prompt prefixes stay stable across gateways.
-- Normalize SSE streams or pass them through in `raw` mode.
-- Fall back across multiple providers with cooldown and circuit-breaker behavior.
-- Inspect and edit runtime config locally through `/admin`.
-- Watch provider health and proxy activity through `/admin/monitor`.
-
-## Requirements
-
-- `Node 22+` and `npm` are recommended for local runs.
-- If you want the fewest local prerequisites, start with the Docker quick start.
+It normalizes Responses API requests and JSON/SSE responses, routes each canonical model through an ordered channel list, exposes aliases, and keeps channel and model-channel health in memory. The proxy is not an official OpenAI project.
 
 ## Quick Start
 
-Install dependencies and create a local runtime instance from the tracked example files:
+Create a local runtime instance from the tracked template:
 
 ```bash
 npm install
 cp -r instances/example-11234 instances/proxy-11234
 cp instances/proxy-11234/.env.example instances/proxy-11234/.env
 cp instances/proxy-11234/fallback.json.example instances/proxy-11234/fallback.json
-cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.json
 ```
 
-The tracked `fallback.json.example` starts empty on purpose. Add fallback providers later only if you want multi-provider failover.
+Edit `instances/proxy-11234/fallback.json` with the upstream channel credentials and model route:
 
-Edit `instances/proxy-11234/.env` and fill at least these required fields:
-
-```env
-PRIMARY_PROVIDER_NAME=primary-provider
-PRIMARY_PROVIDER_BASE_URL=https://provider.example
-PRIMARY_PROVIDER_API_KEY=your_api_key_here
+```json
+{
+  "default_model": "my-model-v2",
+  "channels": [
+    {
+      "id": "primary",
+      "name": "Primary Provider",
+      "base_url": "https://provider.example",
+      "api_key": "your_api_key_here"
+    }
+  ],
+  "models": {
+    "my-model-v2": { "channel_ids": ["primary"] }
+  },
+  "aliases": {}
+}
 ```
 
-Optional but commonly changed:
+Channel and model configuration lives in `fallback.json`; `.env` contains listener, timeout, stream, debug, and health settings. The example keeps `HOST=0.0.0.0` for Docker. Use `HOST=127.0.0.1` for a local-only process.
 
-```env
-PRIMARY_PROVIDER_DEFAULT_MODEL=my-model-v2
-PORT=11234
-```
-
-The shipped `.env.example` keeps `HOST=0.0.0.0` so the same runtime files also work in Docker. For a local-only first run outside Docker, change it to `HOST=127.0.0.1`.
-
-Build and start the proxy with that instance configuration loaded:
+Build and start:
 
 ```bash
 npm run build
-env $(grep -v '^#' instances/proxy-11234/.env | xargs) npm run proxy:start
 ```
 
-Verify a non-streaming request:
+Send a request whose `model` is configured in `models` or `aliases`:
 
 ```bash
 curl -s http://127.0.0.1:11234/v1/responses \
@@ -70,132 +53,71 @@ curl -s http://127.0.0.1:11234/v1/responses \
   -d '{"model":"my-model-v2","input":"Reply with exactly OK.","stream":false}'
 ```
 
-Verify a streaming request:
+Open `http://127.0.0.1:11234/admin` for config editing and `http://127.0.0.1:11234/admin/monitor` for health monitoring.
 
-```bash
-curl -N http://127.0.0.1:11234/v1/responses \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: text/event-stream' \
-  -d '{"model":"my-model-v2","input":"Count to three.","stream":true}'
-```
-
-Open the local admin pages:
-
-- `http://127.0.0.1:11234/admin`
-- `http://127.0.0.1:11234/admin/monitor`
-
-For the full first-run workflow, see `docs/quickstart.md`.
-
-## Claude Code Gateway Compatibility
-
-If requests reach this proxy through Claude Code-oriented gateways, `x-anthropic-billing-header: ...` attribution text can end up inside OpenAI Responses `instructions` or system/developer text blocks.
-
-That line often carries dynamic `cch=...` values, which can break prefix-based prompt caching even when `prompt_cache_key` itself is stable.
-
-Keep this compatibility setting enabled unless you have a reason to preserve the attribution text:
-
-```env
-PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line
-```
-
-`strip_line` is the default and removes the whole billing header line. If you need to keep the attribution text, use `strip_cch` to remove only the dynamic `cch=...` field. User-role content is left untouched. See `docs/configuration.md` for details.
+Persistent usage analytics is available at `/admin/usage` (Node.js 22.13+). It supports hourly/daily ranges, channel/model filters, stacked request/token charts, cache-hit trends, and CSV export. Each instance stores numeric upstream-attempt records in `usage.sqlite` beside its `PROXY_ENV_PATH` file (beside the routing config if no env path is supplied). History starts when the upgraded instance is launched; the existing monitor counters are process-local. See [usage accounting and storage](docs/project_memory/decisions.sdoc).
 
 ## Docker Quick Start
-
-Docker does not need systemd for this project. The container runs the proxy directly as a single foreground process.
-
-Prepare a local runtime instance directory first:
 
 ```bash
 cp -r instances/example-11234 instances/proxy-11234
 cp instances/proxy-11234/.env.example instances/proxy-11234/.env
 cp instances/proxy-11234/fallback.json.example instances/proxy-11234/fallback.json
-cp instances/proxy-11234/model-map.json.example instances/proxy-11234/model-map.json
 ```
 
-Edit `instances/proxy-11234/.env` and fill your provider credentials, then start the container:
+Fill `fallback.json`, then run:
 
 ```bash
 docker compose up --build
 ```
 
-The compose example:
+Compose mounts the instance directory, loads `.env`, and binds the proxy to `127.0.0.1:11234`. Keep the admin-capable port on a trusted host.
 
-- mounts `instances/proxy-11234/` into the container,
-- publishes `127.0.0.1:11234`,
-- enables Docker-specific host access for `/admin` with `PROXY_ADMIN_ALLOW_HOST=1`.
+## Routing Model
 
-If `11234` is already in use on your host, edit the host side of the port mapping in `docker-compose.yaml`.
+- `channels` contains inline credentials and normalized provider base URLs.
+- `models` maps each canonical model to an ordered `channel_ids` list.
+- `aliases` maps client-facing names to canonical models and shares their route and health state.
+- `default_model` is used when a request omits `model` and may name an alias.
 
-After startup, these endpoints are available from the host:
+The proxy scans the complete configured route within request and fallback time budgets. A request with no selectable channel returns `503` with `model_channels_unavailable`; after at least one upstream attempt fails, the existing `fallback_exhausted` response is preserved.
 
-- `http://127.0.0.1:11234/v1/responses`
-- `http://127.0.0.1:11234/admin`
-- `http://127.0.0.1:11234/admin/monitor`
+The admin UI edits channels, ordered model routes, aliases, and the default model. It masks secrets, writes sensitive routing files and backups with mode `0600`, and reloads the validated document atomically. The monitor displays channel rows with model-channel children.
 
-Keep the published admin-capable port on a trusted host or behind additional protection if you change the port binding away from `127.0.0.1`.
+## Claude Code Gateway Compatibility
 
-## Example Requests
+For traffic passing through Claude Code-oriented gateways, keep:
 
-Minimal non-streaming request:
-
-```bash
-curl -s http://127.0.0.1:11234/v1/responses \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"my-model-v2","input":"Say hello.","stream":false}'
+```env
+PROXY_CLAUDE_BILLING_HEADER_MODE=strip_line
 ```
 
-Minimal streaming request:
+This removes dynamic billing attribution lines from `instructions` and system/developer text so stable prompt prefixes remain cacheable. `strip_cch` removes only the dynamic `cch=...` field.
 
-```bash
-curl -N http://127.0.0.1:11234/v1/responses \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: text/event-stream' \
-  -d '{"model":"my-model-v2","input":"Say hello.","stream":true}'
-```
+## Documentation
 
-More examples, including model aliases, fallback, and prompt cache hints, are in `docs/examples.md`.
-
-## Admin UI
-
-The built-in admin UI is available at `http://127.0.0.1:<PORT>/admin`.
-
-- `/admin` lets you inspect and edit `.env`, fallback config, and model mappings.
-- `/admin/monitor` shows provider health, circuit-breaker state, and recent request activity.
-- By default, `/admin` routes only accept localhost connections. If you set `PROXY_ADMIN_ALLOW_HOST=1`, non-localhost requests are allowed too, so keep that port on a trusted host.
-- Secret values are masked and require explicit replacement.
-- Changes to `PORT` or `HOST` still require a full process restart.
-
-## Docs Map
-
-- `docs/quickstart.md` - shortest path from clean checkout to first request.
-- `docs/examples.md` - copy-paste requests and config snippets.
-- `docs/configuration.md` - required fields, recommended values, advanced knobs.
-- `docs/streaming-compatibility.md` - SSE behavior, raw vs normalized mode, timeout phases.
-- `docs/operations.md` - multi-instance layout, systemd, admin workflow, safe restarts.
-- `Dockerfile` and `docker-compose.yaml` - container build and local Docker deployment.
-- `docs/publishing-checklist.md` - final pre-push checklist before publishing to a public remote.
+- `docs/quickstart.md` - first local run.
+- `docs/examples.md` - routing and request examples.
+- `docs/configuration.md` - routing document, environment variables, health, and secrets.
+- `docs/streaming-compatibility.md` - normalized and raw SSE behavior.
+- `docs/operations.md` - multi-instance, migration, systemd, Docker, and admin workflows.
 
 ## Repository Layout
 
 - `src/` - production proxy source and compatibility helpers.
 - `checks/` - regression and smoke checks.
-- `tools/` - manual smoke and load tools.
-- `instances/` - tracked example instance layouts and local runtime copies.
+- `tools/` - manual smoke, load, and migration tools.
+- `instances/` - tracked example instance layouts and gitignored runtime copies.
 - `deploy/systemd/` - systemd service template.
 - `public/admin/` - static admin UI assets.
 - `docs/` - public documentation.
 
 ## Security Notes
 
-- Never commit real `.env` files, real `instances/proxy-*` directories, API keys, logs, captures, or raw debug dumps.
-- Admin routes are intended for local or trusted-network use only. Do not expose them directly to the public internet.
-- Prompt cache keys must be stable. Do not include timestamps, random IDs, or request IDs.
-- Debug capture directories can contain full prompts and provider responses. Keep debug toggles off unless actively investigating an issue.
-
-## Friendly Links
-
-- [linux.do](https://linux.do)
+- Never commit real `.env` files, `instances/proxy-*`, API keys, logs, captures, or raw debug dumps.
+- Keep `/admin` on localhost or a trusted network.
+- Treat `fallback.json` and `fallback.json.bak` as sensitive files and preserve mode `0600`.
+- Prompt cache keys must be stable; do not include timestamps, random IDs, or request IDs.
 
 ## License
 

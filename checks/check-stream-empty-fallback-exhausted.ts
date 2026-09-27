@@ -67,9 +67,15 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
-        { name: 'empty-fallback', base_url: `http://127.0.0.1:${fallbackAddress.port}`, api_key: 'fallback-key' },
+      default_model: 'empty-model',
+      channels: [
+        { id: 'primary', name: 'empty-primary', base_url: `http://127.0.0.1:${primaryAddress.port}`, api_key: 'primary-key' },
+        { id: 'empty-fallback', base_url: `http://127.0.0.1:${fallbackAddress.port}`, api_key: 'fallback-key' },
       ],
+      models: {
+        'empty-model': { channel_ids: ['primary', 'empty-fallback'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -82,11 +88,12 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-stream-empty-exhausted-check',
-      PRIMARY_PROVIDER_NAME: 'empty-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${primaryAddress.port}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
-      PROXY_MAX_FALLBACK_ATTEMPTS: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

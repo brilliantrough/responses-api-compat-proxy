@@ -11,6 +11,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const MODEL = 'fallback-model';
 
 async function waitForHealthy(url: string) {
   const startedAt = Date.now();
@@ -35,11 +36,18 @@ async function getPrimaryHealth(url: string) {
   const response = await fetch(url);
   assert.equal(response.status, 200);
   const body = await response.json() as {
-    endpointHealth?: Array<{ name?: string; state?: string; failureCount?: number; lastFailureReason?: string | null }>;
+    healthSnapshot?: {
+      channels?: Array<{ channelId?: string; state?: string; successCount?: number }>;
+      modelChannels?: Array<{ channelId?: string; canonicalModel?: string; state?: string; failureCount?: number; lastFailureReason?: string | null }>;
+    };
   };
-  const primary = body.endpointHealth?.find(item => item.name === 'empty-primary');
-  assert.ok(primary);
-  return primary;
+  const primaryChannel = body.healthSnapshot?.channels?.find(item => item.channelId === 'primary');
+  const primaryModelChannel = body.healthSnapshot?.modelChannels?.find(
+    item => item.channelId === 'primary' && item.canonicalModel === MODEL,
+  );
+  assert.ok(primaryChannel);
+  assert.ok(primaryModelChannel);
+  return { channel: primaryChannel, modelChannel: primaryModelChannel };
 }
 
 async function main() {
@@ -120,13 +128,15 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
-        {
-          name: 'fallback-a',
-          base_url: `http://127.0.0.1:${fallbackAddress.port}`,
-          api_key: 'fallback-key',
-        },
+      default_model: MODEL,
+      channels: [
+        { id: 'primary', name: 'empty-primary', base_url: `http://127.0.0.1:${primaryAddress.port}`, api_key: 'primary-key' },
+        { id: 'fallback-a', base_url: `http://127.0.0.1:${fallbackAddress.port}`, api_key: 'fallback-key' },
       ],
+      models: {
+        [MODEL]: { channel_ids: ['primary', 'fallback-a'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -139,9 +149,11 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-nonstream-fallback-check',
-      PRIMARY_PROVIDER_NAME: 'empty-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${primaryAddress.port}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -159,7 +171,7 @@ async function main() {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: 'fallback-model',
+        model: MODEL,
         input: 'hello',
       }),
     });
@@ -167,18 +179,20 @@ async function main() {
     assert.equal(response.status, 200);
     const body = await response.json() as { id?: string };
     assert.equal(body.id, 'resp_fallback_ok');
-    assert.equal(primaryRequests, 1);
+    assert.equal(primaryRequests, 3);
     assert.equal(fallbackRequests, 1);
     const primaryAfterFirstFailure = await getPrimaryHealth(`http://127.0.0.1:${proxyPort}/admin/stats`);
-    assert.equal(primaryAfterFirstFailure.state, 'open');
-    assert.equal(primaryAfterFirstFailure.failureCount, 1);
-    assert.equal(primaryAfterFirstFailure.lastFailureReason, 'empty_response');
+    assert.equal(primaryAfterFirstFailure.channel.state, 'closed');
+    assert.equal(primaryAfterFirstFailure.channel.successCount, 0, 'reachability-proven failure resets the breaker but is not a request success');
+    assert.equal(primaryAfterFirstFailure.modelChannel.state, 'closed');
+    assert.equal(primaryAfterFirstFailure.modelChannel.failureCount, 3);
+    assert.equal(primaryAfterFirstFailure.modelChannel.lastFailureReason, 'invalid_response');
 
     const secondResponse = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: 'fallback-model',
+        model: MODEL,
         input: 'hello again',
       }),
     });
@@ -186,18 +200,17 @@ async function main() {
     assert.equal(secondResponse.status, 200);
     const secondBody = await secondResponse.json() as { id?: string };
     assert.equal(secondBody.id, 'resp_fallback_ok');
-    assert.equal(primaryRequests, 1);
+    assert.equal(primaryRequests, 6, 'next request receives a fresh three-attempt budget');
     assert.equal(fallbackRequests, 2);
     const primaryAfterSecondFailure = await getPrimaryHealth(`http://127.0.0.1:${proxyPort}/admin/stats`);
-    assert.equal(primaryAfterSecondFailure.state, 'open');
-    assert.equal(primaryAfterSecondFailure.failureCount, 1);
-    assert.equal(primaryAfterSecondFailure.lastFailureReason, 'empty_response');
+    assert.equal(primaryAfterSecondFailure.channel.state, 'closed');
+    assert.equal(primaryAfterSecondFailure.modelChannel.state, 'closed');
+    assert.equal(primaryAfterSecondFailure.modelChannel.failureCount, 6);
+    assert.equal(primaryAfterSecondFailure.modelChannel.lastFailureReason, 'invalid_response');
 
     const output = stdout.join('');
     assert.match(output, /upstream json response incomplete, falling back/);
     assert.match(output, /fallbackReason":"empty_response"/);
-    assert.match(output, /endpoint circuit opened/);
-    assert.match(output, /skipping upstream during circuit cooldown/);
 
     console.log('Non-stream fallback check passed.');
   } finally {

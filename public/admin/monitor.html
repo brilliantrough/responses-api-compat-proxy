@@ -3,46 +3,60 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Provider Monitor</title>
+<meta name="theme-color" content="#ffffff">
+<title>Channel Monitor · Relay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ffffff'/%3E%3Cpath d='M8 12v13m8-19v19m8-16v11' stroke='%233b63dc' stroke-width='4'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/admin/assets/monitor.css">
 </head>
 <body>
-<main class="monitor-shell">
-  <header class="monitor-header">
-    <div>
-      <h1>Provider Monitor</h1>
-      <p>Live proxy and upstream health. Polling is quiet and does not add per-refresh log lines.</p>
-    </div>
-    <p id="monitor-status">Loading...</p>
-  </header>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<div class="app-shell">
+  <aside class="app-sidebar">
+    <a class="brand" href="/admin" aria-label="Relay home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>relay<span class="brand-caption">RESPONSES GATEWAY</span></span></a>
+    <div class="workspace-label"><span class="workspace-avatar">R</span><div>Proxy workspace<small>OpenAI-compatible API</small></div></div>
+    <nav class="app-nav" aria-label="Main navigation">
+      <div class="nav-label">WORKSPACE</div>
+      <a class="nav-link active" href="/admin/monitor" aria-current="page"><span class="nav-icon" aria-hidden="true">◷</span>Overview<span class="nav-live">LIVE</span></a>
+      <a id="usage-nav" class="nav-link" href="/admin/usage" hidden><span class="nav-icon" aria-hidden="true">▥</span>Usage<span class="nav-live">HISTORY</span></a>
+      <div class="nav-label">CONFIGURATION</div>
+      <a class="nav-link" href="/admin#channels"><span class="nav-icon" aria-hidden="true">⊞</span>Channels</a>
+      <a class="nav-link" href="/admin#models"><span class="nav-icon" aria-hidden="true">⑂</span>Model routing</a>
+      <a class="nav-link" href="/admin#compact"><span class="nav-icon" aria-hidden="true">⇥</span>Compaction</a>
+      <a class="nav-link" href="/admin#aliases"><span class="nav-icon" aria-hidden="true">↗</span>Aliases</a>
+      <div class="nav-label">SYSTEM</div>
+      <a class="nav-link" href="/admin#environment"><span class="nav-icon" aria-hidden="true">⚙︎</span>Environment</a>
+      <a class="nav-link" href="/admin#runtime"><span class="nav-icon" aria-hidden="true">≡</span>Runtime</a>
+    </nav>
+    <div class="sidebar-footer"><span class="sidebar-dot"></span><div>Responses API proxy<small>Configuration & observability</small></div><span class="footer-version">v1</span></div>
+  </aside>
 
-  <section id="global-cards" class="cards"></section>
+  <div class="app-main">
+    <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>Overview</strong></div><div class="topbar-status"><span id="monitor-instance" class="badge">Instance —</span><span class="badge">Refresh / 1s</span></div></header>
+    <main id="main-content" class="monitor-shell content-grid" tabindex="-1">
+      <div class="page-heading monitor-header"><div><div class="eyebrow">GATEWAY OBSERVABILITY</div><h1>A pulse on your proxy.</h1><p>Live traffic, fallback routes, and the health of every channel.</p></div><a class="button-link" href="/admin">Manage configuration <span aria-hidden="true">↗</span></a></div>
+      <div class="monitor-status-line"><p id="monitor-status" role="status">Connecting to your instance…</p><div class="health-legend"><span><i class="legend-dot state-ok"></i>Closed</span><span><i class="legend-dot state-warn"></i>Half-open</span><span><i class="legend-dot state-bad"></i>Open</span><span><i class="legend-dot state-quota"></i>Quota</span></div></div>
+      <section id="global-cards" class="cards" aria-label="Live request statistics"></section>
+      <p id="breaker-policy" class="field-helper" hidden></p>
 
-  <section class="panel">
-    <h2>Provider Health</h2>
-    <table id="provider-table">
-      <thead>
-        <tr>
-          <th>State</th>
-          <th>Name</th>
-          <th>Type</th>
-          <th>Cooldown</th>
-          <th>Failures</th>
-          <th>Successes</th>
-          <th>Last Failure</th>
-          <th>Last Success</th>
-          <th>URL</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </section>
+      <section class="panel traffic-panel" aria-labelledby="traffic-title"><div class="panel-heading"><div><div class="eyebrow">TRAFFIC</div><h2 id="traffic-title">Active requests</h2><p>Concurrency sampled every second while this tab is visible.</p></div><span id="trend-peak" class="badge">Peak —</span></div><div class="chart-wrap"><div class="chart-grid" aria-hidden="true"><span></span><span></span><span></span></div><div id="trend-bars" class="trend-bars" role="img" aria-label="Recent active request samples"></div><div id="trend-empty" class="chart-empty">Waiting for traffic · no active requests</div></div><div class="chart-axis"><span id="trend-start">Collecting samples</span><span>Now</span></div></section>
 
-  <section class="panel">
-    <h2>Recent Active Requests</h2>
-    <div id="trend-bars" class="trend-bars"></div>
-  </section>
-</main>
+      <section class="panel" aria-labelledby="routes-title"><div class="panel-heading"><div><h2 id="routes-title">Route Overview</h2><p>Ordered fallbacks for each model. Select a model to inspect its channels.</p></div><span id="monitor-route-count" class="badge">— models</span></div><div class="table-scroll"><table id="route-table"><thead><tr><th>Canonical model</th><th>Channel priority <span class="th-note">FIRST → LAST</span></th></tr></thead><tbody></tbody></table></div></section>
+
+      <section class="panel" aria-labelledby="health-title"><div class="panel-heading"><div><h2 id="health-title">Channel Health</h2><p>Cumulative upstream attempts and circuit-breaker state.</p></div><span id="monitor-channel-count" class="badge">— channels</span></div><div class="table-scroll"><table id="channel-table"><thead><tr>
+        <th class="stat-col-channel">Channel</th>
+        <th class="stat-col-state" title="Effective automatic, quota and manual breaker state">State</th>
+        <th class="stat-col-requests" title="Total upstream attempts since proxy start (successes + failures), summed across all models on this channel; never resets">Requests</th>
+        <th class="stat-col-split" title="Cumulative successes / failures since proxy start summed across all models on this channel; neither count resets">S / F</th>
+        <th class="stat-col-rate" title="Cumulative success percentage across all models on this channel">Rate</th>
+        <th class="stat-col-breaker" title="Rolling window successes / failures and failure rate; threshold requires both minimum failures and rate">Breaker</th>
+        <th class="stat-col-cooldown" title="Seconds until automatic cooldown expires">Cooldown</th>
+        <th class="stat-col-reason" title="Most recent channel-scope failure reason">Reason</th>
+        <th class="stat-col-last-ok" title="Last success and immediate channel-wide breaker controls">Last OK / 操作</th>
+      </tr></thead><tbody></tbody></table></div></section>
+      <footer class="workspace-footer"><span>Live data from this instance · counters since proxy start</span><a href="/admin/usage#uptime">渠道 Uptime 与用量图表 ↗</a><a href="/admin">Open configuration ↗</a></footer>
+    </main>
+  </div>
+</div>
 <script src="/admin/assets/monitor.js"></script>
 </body>
 </html>

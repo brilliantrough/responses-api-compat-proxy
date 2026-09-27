@@ -36,9 +36,13 @@ async function getPrimaryHealth(url: string) {
   const response = await fetch(url);
   assert.equal(response.status, 200);
   const body = await response.json() as {
-    endpointHealth?: Array<{ name?: string; state?: string; failureCount?: number; lastFailureReason?: string | null }>;
+    healthSnapshot?: {
+      modelChannels?: Array<{ channelId?: string; canonicalModel?: string; state?: string; failureCount?: number; lastFailureReason?: string | null }>;
+    };
   };
-  const primary = body.endpointHealth?.find(item => item.name === 'blackhole-primary');
+  const primary = body.healthSnapshot?.modelChannels?.find(
+    item => item.channelId === 'primary' && item.canonicalModel === 'fallback-model',
+  );
   assert.ok(primary);
   return primary;
 }
@@ -108,13 +112,24 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
+      default_model: 'fallback-model',
+      channels: [
         {
-          name: 'fallback-a',
+          id: 'primary',
+          name: 'blackhole-primary',
+          base_url: `http://127.0.0.1:${blackholePort}`,
+          api_key: 'primary-key',
+        },
+        {
+          id: 'fallback-a',
           base_url: `http://127.0.0.1:${fallbackAddress.port}`,
           api_key: 'fallback-key',
         },
       ],
+      models: {
+        'fallback-model': { channel_ids: ['primary', 'fallback-a'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -127,9 +142,11 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-timeout-fallback-check',
-      PRIMARY_PROVIDER_NAME: 'blackhole-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${blackholePort}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
       PROXY_UPSTREAM_TIMEOUT_MS: '300',
       PROXY_NON_STREAM_TIMEOUT_MS: '300',

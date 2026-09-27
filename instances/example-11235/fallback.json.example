@@ -1,3 +1,17 @@
 {
-  "fallback_api_config": []
+  "default_model": "your-model-name",
+  "channels": [
+    {
+      "id": "primary",
+      "name": "Primary Provider",
+      "base_url": "https://your-provider.example",
+      "api_key": "your-api-key-here"
+    }
+  ],
+  "models": {
+    "your-model-name": {
+      "channel_ids": ["primary"]
+    }
+  },
+  "aliases": {}
 }

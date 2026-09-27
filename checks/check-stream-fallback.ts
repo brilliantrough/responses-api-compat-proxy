@@ -11,6 +11,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const MODEL = 'fallback-model';
 
 async function waitForHealthy(url: string) {
   const startedAt = Date.now();
@@ -100,13 +101,15 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
-        {
-          name: 'fallback-a',
-          base_url: `http://127.0.0.1:${fallbackAddress.port}`,
-          api_key: 'fallback-key',
-        },
+      default_model: MODEL,
+      channels: [
+        { id: 'primary', name: 'meta-only-primary', base_url: `http://127.0.0.1:${primaryAddress.port}`, api_key: 'primary-key' },
+        { id: 'fallback-a', base_url: `http://127.0.0.1:${fallbackAddress.port}`, api_key: 'fallback-key' },
       ],
+      models: {
+        [MODEL]: { channel_ids: ['primary', 'fallback-a'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -119,9 +122,11 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-stream-fallback-check',
-      PRIMARY_PROVIDER_NAME: 'meta-only-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${primaryAddress.port}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -142,7 +147,7 @@ async function main() {
         accept: 'text/event-stream',
       },
       body: JSON.stringify({
-        model: 'fallback-model',
+        model: MODEL,
         input: 'hello',
         stream: true,
       }),
@@ -152,12 +157,29 @@ async function main() {
     const text = await response.text();
     assert.match(text, /response\.output_text\.delta/);
     assert.match(text, /"delta":"hello"/);
-    assert.equal(primaryRequests, 1);
+    assert.equal(primaryRequests, 3);
     assert.equal(fallbackRequests, 1);
 
     const output = stdout.join('');
     assert.match(output, /stream completed without usable output, falling back/);
     assert.match(output, /fallbackReason":"stream_no_text_content"/);
+
+    const statsResponse = await fetch(`http://127.0.0.1:${proxyPort}/admin/monitor/stats`);
+    assert.equal(statsResponse.status, 200);
+    const stats = await statsResponse.json() as {
+      healthSnapshot: {
+        modelChannels: Array<{ channelId: string; canonicalModel: string; state: string; successCount: number; failureCount: number; totalFailures: number; lastFailureReason: string | null }>;
+      };
+    };
+    const modelRecords = stats.healthSnapshot.modelChannels.filter(entry => entry.canonicalModel === MODEL);
+    const primaryRecord = modelRecords.find(entry => entry.channelId === 'primary');
+    const fallbackRecord = modelRecords.find(entry => entry.channelId === 'fallback-a');
+    assert.ok(primaryRecord, 'primary model-channel record should exist');
+    assert.ok(fallbackRecord, 'fallback model-channel record should exist');
+    assert.ok(primaryRecord.lastFailureReason !== 'disposed', 'real fallback failures must be reported with their actual reason, not disposed');
+    assert.equal(primaryRecord.totalFailures, 3);
+    assert.equal(fallbackRecord.successCount, 1, 'streaming success must be counted (dispose must not swallow reportSuccess)');
+    assert.equal(fallbackRecord.lastFailureReason, null);
 
     console.log('Stream fallback check passed.');
   } finally {

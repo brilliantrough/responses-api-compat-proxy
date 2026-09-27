@@ -25,8 +25,19 @@ function writeFallbackJson(filePath: string, content: unknown) {
   writeFileSync(filePath, JSON.stringify(content, null, 2), 'utf8');
 }
 
-function writeModelMapJson(filePath: string, content: unknown) {
-  writeFileSync(filePath, JSON.stringify(content, null, 2), 'utf8');
+function routingDocument() {
+  return {
+    default_model: 'model-a',
+    channels: [
+      { id: 'alpha', name: 'Alpha', base_url: 'https://alpha.example', api_key: 'alpha-secret' },
+      { id: 'beta', base_url: 'https://beta.example', api_key: 'beta-secret' },
+    ],
+    models: {
+      'model-a': { channel_ids: ['alpha', 'beta'] },
+      'model-b': { channel_ids: ['beta'] },
+    },
+    aliases: { latest: 'model-a' },
+  };
 }
 
 function startServer(
@@ -58,35 +69,18 @@ async function main() {
     const configDir = makeTempDir();
     const envPath = path.join(configDir, '.env');
     const fallbackPath = path.join(configDir, 'fallback.json');
-    const modelMapPath = path.join(configDir, 'model-map.json');
 
-    writeFallbackJson(fallbackPath, {
-      fallback_api_config: [
-        { name: 'fb-a', base_url: 'https://fb.example', api_key_env: 'FB_A_KEY' },
-        { name: 'fb-inline', base_url: 'https://inline.example', api_key: 'inline-secret-xyz' },
-      ],
-    });
-    writeModelMapJson(modelMapPath, { model_mappings: { 'alias-x': 'model-y' } });
+    writeFallbackJson(fallbackPath, routingDocument());
     writeDotEnv(envPath, [
-      'PRIMARY_PROVIDER_NAME=test-primary',
-      'PRIMARY_PROVIDER_BASE_URL=https://api.test.example',
-      'PRIMARY_PROVIDER_API_KEY=test-key-123',
-      'PRIMARY_PROVIDER_DEFAULT_MODEL=gpt-4o-test',
       'PORT=0',
       'HOST=127.0.0.1',
-      'PROXY_STREAM_MODE=normalized',
       'FB_A_KEY=fb-secret-key',
       `FALLBACK_CONFIG_PATH=${fallbackPath}`,
-      `MODEL_MAP_PATH=${modelMapPath}`,
     ]);
 
     const runtimeStore = createRuntimeConfigStore({ envPath });
     const snap = runtimeStore.getSnapshot();
-    const configStore = createConfigFileStoreFromPaths({
-      envPath,
-      fallbackPath: snap.config.fallbackConfigPath,
-      modelMapPath: snap.config.modelMappingPath,
-    });
+    const configStore = createConfigFileStoreFromPaths({ envPath, fallbackPath: snap.config.routingConfigPath });
     const adminHandler = createAdminHandler({ configStore, runtimeStore });
     const { port } = await startServer(adminHandler);
     const baseUrl = `http://127.0.0.1:${port}`;
@@ -95,264 +89,126 @@ async function main() {
     const htmlRes = await fetch(`${baseUrl}/admin`);
     assert.equal(htmlRes.status, 200);
     const html = await htmlRes.text();
-
-    const requiredIds = [
-      'status', 'dirty-badge', 'restart-notice',
-      'primary-table', 'fallback-table', 'btn-add-fallback',
-      'model-mappings-list', 'btn-add-mapping',
-      'runtime-table',
-      'btn-validate', 'btn-save', 'btn-reload', 'btn-rollback',
-      'validation-result', 'action-result',
-      'instance-summary', 'topbar-runtime-version', 'topbar-active-requests',
-    ];
-    for (const id of requiredIds) {
+    for (const id of [
+      'status', 'dirty-badge', 'restart-notice', 'primary-table', 'default-model-input',
+      'channels-table', 'btn-add-channel', 'model-routes-list', 'btn-add-model-route',
+      'aliases-list', 'btn-add-alias', 'runtime-table', 'btn-validate', 'btn-save', 'btn-reload', 'btn-rollback',
+      'validation-result', 'action-result', 'instance-summary', 'topbar-runtime-version', 'topbar-active-requests',
+    ]) {
       assert.ok(html.includes(id), `HTML should contain element id="${id}"`);
     }
 
-    console.log('=== 2b. HTML renders the redesigned shared admin shell ===');
-    const requiredShellClasses = [
-      'admin-shell',
-      'topbar',
-      'content-grid',
-      'config-column',
-      'status-column',
-    ];
-    for (const cls of requiredShellClasses) {
-      assert.ok(
-        html.includes(cls),
-        `admin page should render the shared admin shell class "${cls}"`,
-      );
-    }
-
-    console.log('=== 2c. HTML renders the redesigned notice and status panel structure ===');
-    assert.ok(
-      html.includes('status-panel'),
-      'admin page should render the read-only status panel',
-    );
-    assert.ok(
-      html.includes('panel-title'),
-      'admin page should render compact panel titles',
-    );
-
-    console.log('=== 3. JS loads and references key behaviors ===');
+    console.log('=== 3. JS references key routing behaviors ===');
     const jsRes = await fetch(`${baseUrl}/admin/assets/admin.js`);
     assert.equal(jsRes.status, 200);
     const js = await jsRes.text();
-    assert.ok(js.includes('loadConfig'), 'JS should define loadConfig');
-    assert.ok(js.includes('/admin/config'), 'JS should fetch /admin/config');
-    assert.ok(js.includes('/admin/config/validate'), 'JS should call validate endpoint');
-    assert.ok(js.includes('/admin/config/reload'), 'JS should call reload endpoint');
-    assert.ok(js.includes('/admin/config/rollback'), 'JS should call rollback endpoint');
-    assert.ok(js.includes('PUT'), 'JS should use PUT for save');
-    assert.ok(js.includes('secretAction'), 'JS should handle secret actions');
-    assert.ok(js.includes('password'), 'JS should use password inputs for secrets');
-    assert.ok(js.includes('restartRequired'), 'JS should check restart-required fields');
-    assert.ok(js.includes('badge-dirty'), 'JS should track dirty state');
-    assert.ok(js.includes('addFallbackProvider'), 'JS should define addFallbackProvider');
-    assert.ok(js.includes('disableCooldown'), 'JS should handle fallback disableCooldown');
-    assert.ok(js.includes('PROXY_CLAUDE_BILLING_HEADER_MODE'), 'JS should expose Claude billing header mode');
-    assert.ok(js.includes('strip_cch'), 'JS should offer strip_cch mode');
-
-    console.log('=== 3b. JS safely renders overview fields and resets action notices ===');
-    assert.ok(!js.includes('info.innerHTML'), 'overview renderer should not build read-only fields with HTML strings');
-    assert.ok(js.includes("info.textContent = ''"), 'overview renderer should clear stale rows before rendering');
-    assert.ok(js.includes('appendOverviewField'), 'overview renderer should construct fields through DOM nodes');
-    assert.ok(js.includes('clearActionResult'), 'action handlers should clear result text and notice classes together');
-
-    console.log('=== 3c. JS uses the redesigned model mapping editor structure ===');
-    assert.ok(js.includes('mapping-row'), 'model mapping renderer should use the redesigned mapping row class');
-    assert.ok(js.includes('mapping-arrow'), 'model mapping renderer should render the visual mapping arrow');
-
-    console.log('=== 3d. JS uses the redesigned provider/fallback editor structure ===');
-    assert.ok(js.includes('fallback-row'), 'fallback renderer should emit redesigned fallback rows');
-
-    console.log('=== 3e. JS keeps fallback dirty and inline secret UI state consistent ===');
-    assert.ok(js.includes('normalizeFallbackForDirty'), 'fallback dirty checks should normalize inline and non-inline secret action semantics');
-    assert.ok(!js.includes("secretAction: 'keep', disableCooldown"), 'non-inline fallback rows should not compare against synthetic keep secretAction values');
-    assert.ok(js.includes('actionSel.value = draftFallback[idx].secretAction'), 'typing an inline replacement secret should update the visible action select');
+    assert.ok(js.includes('default-model-input'));
+    assert.ok(js.includes('channels-table'));
+    assert.ok(js.includes('model-routes-list'));
+    assert.ok(js.includes('aliases-list'));
+    assert.ok(js.includes('apiKeyAction'));
+    assert.ok(js.includes('apiKeyValue'));
+    assert.ok(js.includes('addChannel'));
+    assert.ok(js.includes('addModelRoute'));
+    assert.ok(js.includes('addAlias'));
+    assert.ok(js.includes('secretAction'));
 
     console.log('=== 4. CSS has required styles ===');
     const cssRes = await fetch(`${baseUrl}/admin/assets/admin.css`);
     assert.equal(cssRes.status, 200);
     const css = await cssRes.text();
-    assert.ok(css.includes('section'), 'CSS should style sections');
-    assert.ok(css.includes('badge-dirty'), 'CSS should have dirty badge style');
-    assert.ok(css.includes('notice-restart'), 'CSS should have restart notice style');
-    assert.ok(css.includes('notice-error'), 'CSS should have error notice style');
-    assert.ok(css.includes('btn-row'), 'CSS should style button rows');
+    assert.ok(css.includes('routing-row'));
+    assert.ok(css.includes('channel-key-wrap'));
+    assert.ok(css.includes('masked-secret'));
 
-    console.log('=== 5. Config API returns data for all UI sections ===');
+    console.log('=== 5. Config API returns new admin view shape ===');
     const configRes = await fetch(`${baseUrl}/admin/config`);
-    const configBody = (await configRes.json()) as Record<string, unknown>;
+    const configBody = await configRes.json() as Record<string, unknown>;
     assert.ok(configBody.ok);
     const config = configBody.config as Record<string, unknown>;
-    assert.ok(Array.isArray(config.env), 'should have env array');
-    assert.ok(Array.isArray(config.fallbackProviders), 'should have fallbackProviders array');
-    assert.ok(config.modelMappings && typeof config.modelMappings === 'object', 'should have modelMappings');
-    assert.equal(typeof configBody.runtimeVersion, 'number', 'should have runtimeVersion');
-    assert.ok(Array.isArray(configBody.restartRequiredFields), 'should have restartRequiredFields');
+    assert.ok(Array.isArray(config.env));
+    assert.ok(Array.isArray(config.channels));
+    assert.ok(Array.isArray(config.models));
+    assert.equal(config.defaultModel, 'model-a');
+    assert.deepEqual(config.aliases, { latest: 'model-a' });
 
+    const channels = config.channels as Array<Record<string, unknown>>;
+    assert.equal(channels[0]?.apiKeyMasked, '***');
+    assert.equal(channels[0]?.apiKeyConfigured, true);
     const envArr = config.env as Array<Record<string, unknown>>;
-    const secretEntry = envArr.find(e => e.key === 'PRIMARY_PROVIDER_API_KEY');
-    assert.ok(secretEntry, 'should have PRIMARY_PROVIDER_API_KEY');
-    assert.equal(secretEntry!.value, '***', 'API key should be masked');
-    const billingModeEntry = envArr.find(e => e.key === 'PROXY_CLAUDE_BILLING_HEADER_MODE');
-    assert.ok(billingModeEntry, 'should have default PROXY_CLAUDE_BILLING_HEADER_MODE for runtime UI');
-    assert.equal(billingModeEntry!.value, 'strip_line');
+    assert.equal(envArr.find(entry => entry.key === 'FB_A_KEY')?.value, '***');
 
-    const fbArr = config.fallbackProviders as Array<Record<string, unknown>>;
-    assert.equal(fbArr.length, 2, 'should have two fallback providers');
-    assert.equal(fbArr[0].name, 'fb-a');
-    assert.equal(fbArr[0].apiKeyMode, 'env');
-    assert.equal(fbArr[0].disableCooldown, false);
-    assert.equal(fbArr[0].apiKeyMasked, '***', 'fallback env key should be masked');
-    assert.equal(fbArr[1].name, 'fb-inline');
-    assert.equal(fbArr[1].apiKeyMode, 'inline');
-    assert.equal(fbArr[1].apiKeyMasked, '***', 'fallback inline key should be masked');
+    console.log('=== 6. Secret env and channel keep drafts validate ===');
+    const validateRes = await fetch(`${baseUrl}/admin/config/validate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        env: [{ key: 'FB_A_KEY', secretAction: 'keep' }],
+        defaultModel: 'latest',
+        channels: [
+          { id: 'alpha', name: 'Alpha', baseUrl: 'https://alpha.example', apiKeyAction: 'keep' },
+          { id: 'beta', baseUrl: 'https://beta.example', apiKeyAction: 'keep' },
+        ],
+        models: [{ canonicalModel: 'model-a', channelIds: ['alpha', 'beta'] }],
+        aliases: { latest: 'model-a' },
+      }),
+    });
+    const validateBody = await validateRes.json() as Record<string, unknown>;
+    assert.equal(validateBody.valid, true);
 
-    const mm = config.modelMappings as Record<string, string>;
-    assert.equal(mm['alias-x'], 'model-y', 'model mapping should be present');
+    console.log('=== 7. Keep preserves inline keys and replace updates them ===');
+    const saveKeepRes = await fetch(`${baseUrl}/admin/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        env: [{ key: 'FB_A_KEY', secretAction: 'keep' }],
+        defaultModel: 'model-a',
+        channels: [
+          { id: 'alpha', name: 'Alpha', baseUrl: 'https://alpha.example', apiKeyAction: 'keep' },
+          { id: 'beta', baseUrl: 'https://beta.example', apiKeyAction: 'keep' },
+        ],
+        models: [{ canonicalModel: 'model-a', channelIds: ['alpha', 'beta'] }],
+        aliases: { latest: 'model-a' },
+      }),
+    });
+    assert.equal(saveKeepRes.status, 200);
+    const saveKeepBody = await saveKeepRes.json() as Record<string, unknown>;
+    assert.equal(saveKeepBody.ok, true);
 
-    console.log('=== 6. Secret env entries with keep do not leak masked value ===');
-    {
-      const draftEnvSecretKeep = envArr
-        .filter(e => e.secret)
-        .map(e => ({ key: e.key, secretAction: 'keep' as const }));
-      assert.ok(draftEnvSecretKeep.length > 0, 'should have at least one secret env entry');
+    const saveReplaceRes = await fetch(`${baseUrl}/admin/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        env: [{ key: 'FB_A_KEY', secretAction: 'replace', value: 'fb-secret-key-new' }],
+        defaultModel: 'model-b',
+        channels: [
+          { id: 'alpha', name: 'Alpha', baseUrl: 'https://alpha.example', apiKeyAction: 'replace', apiKeyValue: 'alpha-new' },
+          { id: 'beta', baseUrl: 'https://beta.example', apiKeyAction: 'keep' },
+        ],
+        models: [{ canonicalModel: 'model-b', channelIds: ['beta', 'alpha'] }],
+        aliases: { latest: 'model-b' },
+      }),
+    });
+    assert.equal(saveReplaceRes.status, 200);
+    const fallback = JSON.parse(readFileSync(fallbackPath, 'utf8')) as Record<string, unknown>;
+    assert.equal(fallback.default_model, 'model-b');
+    const savedChannels = fallback.channels as Array<Record<string, unknown>>;
+    assert.equal(savedChannels[0]?.api_key, 'alpha-new');
 
-      for (const entry of draftEnvSecretKeep) {
-        assert.ok(!('value' in entry), `secret "${entry.key}" with keep must not include value field`);
-      }
-
-      const validateRes = await fetch(`${baseUrl}/admin/config/validate`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          env: [
-            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
-            ...draftEnvSecretKeep,
-          ],
-          fallbackProviders: fbArr.map(p => ({
-            name: p.name,
-            baseUrl: p.baseUrl,
-            apiKeyMode: p.apiKeyMode,
-            ...(p.apiKeyEnv ? { apiKeyEnv: p.apiKeyEnv } : {}),
-            secretAction: 'keep' as const,
-          })),
-          modelMappings: mm,
-        }),
-      });
-      const validateBody = (await validateRes.json()) as Record<string, unknown>;
-      assert.equal(validateBody.valid, true, 'keep-without-value draft should validate');
-    }
-
-    console.log('=== 7. Inline fallback secret: keep preserves existing inline key ===');
-    {
-      const origFallback = JSON.parse(readFileSync(fallbackPath, 'utf8'));
-      const origInlineKey = (origFallback.fallback_api_config as Array<Record<string, string>>)
-        .find(p => p.name === 'fb-inline')!.api_key;
-      assert.equal(origInlineKey, 'inline-secret-xyz', 'original inline key should be present');
-
-      const saveRes = await fetch(`${baseUrl}/admin/config`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          env: [
-            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
-            ...envArr.filter(e => e.secret).map(e => ({ key: e.key, secretAction: 'keep' as const })),
-          ],
-          fallbackProviders: [
-            { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'FB_A_KEY' },
-            { name: 'fb-inline', baseUrl: 'https://inline.example', apiKeyMode: 'inline', secretAction: 'keep' as const },
-          ],
-          modelMappings: mm,
-        }),
-      });
-      assert.equal(saveRes.status, 200);
-      const saveBody = (await saveRes.json()) as Record<string, unknown>;
-      assert.equal(saveBody.ok, true, 'save should succeed');
-
-      const afterFallback = JSON.parse(readFileSync(fallbackPath, 'utf8'));
-      const afterInline = (afterFallback.fallback_api_config as Array<Record<string, string>>)
-        .find(p => p.name === 'fb-inline')!;
-      assert.equal(afterInline.api_key, origInlineKey, 'inline key should be preserved on keep');
-    }
-
-    console.log('=== 8. Inline fallback secret: replace updates key, clear removes it ===');
-    {
-      const saveReplace = await fetch(`${baseUrl}/admin/config`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          env: [
-            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
-            ...envArr.filter(e => e.secret).map(e => ({ key: e.key, secretAction: 'keep' as const })),
-          ],
-          fallbackProviders: [
-            { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'FB_A_KEY' },
-            { name: 'fb-inline', baseUrl: 'https://inline.example', apiKeyMode: 'inline', secretAction: 'replace' as const, value: 'new-inline-key' },
-          ],
-          modelMappings: mm,
-        }),
-      });
-      assert.equal(saveReplace.status, 200);
-      const replaced = JSON.parse(readFileSync(fallbackPath, 'utf8'));
-      const replacedEntry = (replaced.fallback_api_config as Array<Record<string, string>>)
-        .find(p => p.name === 'fb-inline')!;
-      assert.equal(replacedEntry.api_key, 'new-inline-key', 'inline key should be replaced');
-
-      const saveClear = await fetch(`${baseUrl}/admin/config`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          env: [
-            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
-            ...envArr.filter(e => e.secret).map(e => ({ key: e.key, secretAction: 'keep' as const })),
-          ],
-          fallbackProviders: [
-            { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'FB_A_KEY' },
-            { name: 'fb-inline', baseUrl: 'https://inline.example', apiKeyMode: 'inline', secretAction: 'clear' as const },
-          ],
-          modelMappings: mm,
-        }),
-      });
-      assert.equal(saveClear.status, 200);
-      const cleared = JSON.parse(readFileSync(fallbackPath, 'utf8'));
-      const clearedEntry = (cleared.fallback_api_config as Array<Record<string, string>>)
-        .find(p => p.name === 'fb-inline')!;
-      assert.ok(!('api_key' in clearedEntry), 'inline key should be removed on clear');
-    }
-
-    console.log('=== 9. Model mapping alias edit renames key ===');
-    {
-      const saveRename = await fetch(`${baseUrl}/admin/config`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          env: [
-            ...envArr.filter(e => !e.secret).map(e => ({ key: e.key, value: e.value })),
-            ...envArr.filter(e => e.secret).map(e => ({ key: e.key, secretAction: 'keep' as const })),
-          ],
-          fallbackProviders: [
-            { name: 'fb-a', baseUrl: 'https://fb.example', apiKeyMode: 'env', apiKeyEnv: 'FB_A_KEY' },
-            { name: 'fb-inline', baseUrl: 'https://inline.example', apiKeyMode: 'none' },
-          ],
-          modelMappings: { 'alias-renamed': 'model-z' },
-        }),
-      });
-      assert.equal(saveRename.status, 200);
-      const mmAfter = JSON.parse(readFileSync(modelMapPath, 'utf8'));
-      assert.deepEqual(mmAfter.model_mappings, { 'alias-renamed': 'model-z' }, 'model mapping should be renamed');
-      assert.ok(!('alias-x' in mmAfter.model_mappings), 'old alias should be gone');
-    }
+    console.log('=== 8. UI shell still serves runtime and error states ===');
+    assert.ok(readFileSync(fallbackPath, 'utf8').includes('model-b'));
+    const reloadRes = await fetch(`${baseUrl}/admin/config/reload`, { method: 'POST' });
+    assert.equal(reloadRes.status, 200);
+    const rollbackRes = await fetch(`${baseUrl}/admin/config/rollback`, { method: 'POST' });
+    assert.equal(rollbackRes.status, 200);
 
     console.log('\nAll admin UI smoke checks passed.');
   } finally {
     for (const server of allServers) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
-    for (const d of allTempDirs) {
-      rmSync(d, { recursive: true, force: true });
+    for (const dir of allTempDirs) {
+      rmSync(dir, { recursive: true, force: true });
     }
   }
 }

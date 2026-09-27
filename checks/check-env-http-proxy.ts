@@ -10,7 +10,6 @@ async function main() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'responses-proxy-env-http-proxy-'));
   const envPath = path.join(tempDir, '.env');
   const fallbackPath = path.join(tempDir, 'fallback.json');
-  const modelMapPath = path.join(tempDir, 'model-map.json');
 
   let proxied = false;
   const proxy = createHttpServer((req, res) => {
@@ -58,19 +57,27 @@ async function main() {
   await writeFile(
     envPath,
     [
-      'PRIMARY_PROVIDER_NAME=test-primary',
-      'PRIMARY_PROVIDER_BASE_URL=https://example.invalid',
-      'PRIMARY_PROVIDER_API_KEY=test-key',
       `FALLBACK_CONFIG_PATH=${fallbackPath}`,
-      `MODEL_MAP_PATH=${modelMapPath}`,
       `HTTP_PROXY=http://127.0.0.1:${proxyAddress.port}`,
       `HTTPS_PROXY=http://127.0.0.1:${proxyAddress.port}`,
       'NO_PROXY=',
     ].join('\n') + '\n',
     'utf8',
   );
-  await writeFile(fallbackPath, JSON.stringify({ fallback_api_config: [] }, null, 2) + '\n', 'utf8');
-  await writeFile(modelMapPath, JSON.stringify({ model_mappings: {} }, null, 2) + '\n', 'utf8');
+  await writeFile(
+    fallbackPath,
+    JSON.stringify({
+      default_model: 'test-model',
+      channels: [
+        { id: 'primary', base_url: 'https://example.invalid', api_key: 'test-key' },
+      ],
+      models: {
+        'test-model': { channel_ids: ['primary'] },
+      },
+      aliases: {},
+    }, null, 2) + '\n',
+    'utf8',
+  );
 
   const originalEnvPath = process.env.PROXY_ENV_PATH;
   const originalHttpProxy = process.env.HTTP_PROXY;

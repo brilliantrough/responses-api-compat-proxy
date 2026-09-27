@@ -41,9 +41,7 @@ async function main() {
 
   const primary = createNetServer(socket => {
     primarySockets.add(socket);
-    socket.on('close', () => {
-      primarySockets.delete(socket);
-    });
+    socket.on('close', () => primarySockets.delete(socket));
   });
 
   primary.listen(0, '127.0.0.1');
@@ -59,13 +57,7 @@ async function main() {
 
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       if (fallbackARequests === 1) {
-        res.end(JSON.stringify({
-          id: 'resp_empty_seed',
-          object: 'response',
-          status: 'completed',
-          model: 'fallback-a-model',
-          output: [],
-        }));
+        res.end(JSON.stringify({ id: 'resp_empty_seed', object: 'response', status: 'completed', model: 'fallback-a-model', output: [] }));
         return;
       }
 
@@ -83,11 +75,7 @@ async function main() {
             content: [{ type: 'output_text', text: 'recovered fallback ok', annotations: [] }],
           },
         ],
-        usage: {
-          input_tokens: 1,
-          output_tokens: 1,
-          total_tokens: 2,
-        },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       }));
       return;
     }
@@ -130,11 +118,7 @@ async function main() {
               content: [{ type: 'output_text', text: 'seed ok', annotations: [] }],
             },
           ],
-          usage: {
-            input_tokens: 1,
-            output_tokens: 1,
-            total_tokens: 2,
-          },
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
         }));
         return;
       }
@@ -168,18 +152,17 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
-        {
-          name: 'fallback-a',
-          base_url: `http://127.0.0.1:${fallbackAAddress.port}`,
-          api_key: 'fallback-a-key',
-        },
-        {
-          name: 'fallback-b',
-          base_url: `http://127.0.0.1:${fallbackBAddress.port}`,
-          api_key: 'fallback-b-key',
-        },
+      default_model: 'fallback-b-model',
+      channels: [
+        { id: 'primary', name: 'blackhole-primary', base_url: `http://127.0.0.1:${primaryAddress.port}`, api_key: 'primary-key' },
+        { id: 'fallback-a', base_url: `http://127.0.0.1:${fallbackAAddress.port}`, api_key: 'fallback-a-key' },
+        { id: 'fallback-b', base_url: `http://127.0.0.1:${fallbackBAddress.port}`, api_key: 'fallback-b-key' },
       ],
+      models: {
+        'fallback-b-model': { channel_ids: ['primary', 'fallback-a', 'fallback-b'] },
+        'fallback-a-model': { channel_ids: ['primary', 'fallback-b', 'fallback-a'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -192,15 +175,16 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-timeout-recovered-fallback-check',
-      PRIMARY_PROVIDER_NAME: 'blackhole-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${primaryAddress.port}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
       PROXY_UPSTREAM_TIMEOUT_MS: '1000',
       PROXY_NON_STREAM_TIMEOUT_MS: '1000',
       PROXY_FIRST_BYTE_TIMEOUT_MS: '1000',
-      PROXY_ENDPOINT_TIMEOUT_COOLDOWN_MS: '2000',
-      PROXY_ENDPOINT_INVALID_RESPONSE_COOLDOWN_MS: '1500',
+      PROXY_MODEL_CHANNEL_COOLDOWN_MS: '1500',
       PROXY_MAX_FALLBACK_TOTAL_MS: '5000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],

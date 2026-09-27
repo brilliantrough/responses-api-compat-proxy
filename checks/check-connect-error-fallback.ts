@@ -73,9 +73,15 @@ async function main() {
   await writeFile(
     fallbackConfigPath,
     JSON.stringify({
-      fallback_api_config: [
-        { name: 'working-fallback', base_url: `http://127.0.0.1:${fallbackAddress.port}`, api_key: 'fallback-key' },
+      default_model: 'fallback-model',
+      channels: [
+        { id: 'primary', name: 'closed-primary', base_url: `http://127.0.0.1:${unusedPrimaryPort}`, api_key: 'primary-key' },
+        { id: 'working-fallback', base_url: `http://127.0.0.1:${fallbackAddress.port}`, api_key: 'fallback-key' },
       ],
+      models: {
+        'fallback-model': { channel_ids: ['primary', 'working-fallback'] },
+      },
+      aliases: {},
     }, null, 2),
     'utf8',
   );
@@ -88,9 +94,11 @@ async function main() {
       HOST: '127.0.0.1',
       PORT: String(proxyPort),
       INSTANCE_NAME: 'responses-proxy-connect-error-fallback-check',
-      PRIMARY_PROVIDER_NAME: 'closed-primary',
-      PRIMARY_PROVIDER_BASE_URL: `http://127.0.0.1:${unusedPrimaryPort}`,
-      PRIMARY_PROVIDER_API_KEY: 'primary-key',
+      PRIMARY_PROVIDER_NAME: undefined,
+      PRIMARY_PROVIDER_BASE_URL: undefined,
+      PRIMARY_PROVIDER_API_KEY: undefined,
+      PRIMARY_PROVIDER_DEFAULT_MODEL: undefined,
+      MODEL_MAP_PATH: undefined,
       FALLBACK_CONFIG_PATH: fallbackConfigPath,
       PROXY_UPSTREAM_TIMEOUT_MS: '300',
       PROXY_FIRST_BYTE_TIMEOUT_MS: '300',
