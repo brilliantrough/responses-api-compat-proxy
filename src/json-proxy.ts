@@ -2590,6 +2590,7 @@ const server = createServer((req, res) => {
     defaultStreamMode,
     fallbackOnCompat4xx,
     fallbackOnRetryable4xx,
+    blockedUaKeywords,
     firstByteTimeoutMs,
     firstTextTimeoutMs,
     forceStoreFalse,
@@ -2717,9 +2718,20 @@ const server = createServer((req, res) => {
         overrideInstructionsText,
         logRequestBodies,
         forceStoreFalse,
+        blockedUaKeywords,
       });
       finish(200, 'health check');
       return;
+    }
+
+    if (blockedUaKeywords.length > 0 && req.url.split(/[?#]/)[0].startsWith('/v1/')) {
+      const requestUserAgent = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : '';
+      const normalizedUserAgent = requestUserAgent.toLowerCase();
+      if (blockedUaKeywords.some(keyword => normalizedUserAgent.includes(keyword))) {
+        sendJson(res, 503, makeError('当前客户端不受服务端支持，请更换客户端后重试', 503).body);
+        finish(503, 'client user-agent blocked', { userAgent: requestUserAgent });
+        return;
+      }
     }
 
 

@@ -55,6 +55,7 @@ export type ProxyRuntimeConfig = {
   fallbackOnCompat4xx: boolean;
   compatFallbackPatterns: string[];
   clientErrorPatterns: string[];
+  blockedUaKeywords: string[];
   maxFallbackTotalMs: number;
 };
 
@@ -271,6 +272,7 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
     env.PROXY_NO_FALLBACK_CLIENT_ERROR_PATTERNS ?? env.PROXY_FALLBACK_CLIENT_ERROR_PATTERNS,
     defaultClientErrorPatterns,
   );
+  const blockedUaKeywords = parseEnvList(env.PROXY_BLOCKED_UA_KEYWORDS, []);
   const maxFallbackTotalMs = Number(env.PROXY_MAX_FALLBACK_TOTAL_MS ?? 30000);
 
   return {
@@ -317,6 +319,7 @@ export function createProxyRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
     fallbackOnCompat4xx,
     compatFallbackPatterns,
     clientErrorPatterns,
+    blockedUaKeywords,
     maxFallbackTotalMs,
   };
 }
