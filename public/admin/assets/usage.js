@@ -1,9 +1,11 @@
 (function () {
   'use strict';
   var $ = function (id) { return document.getElementById(id); };
-  var palette = ['#6386ed', '#32ad96', '#a28be0', '#e5b256', '#df849b', '#62b7d4', '#9ea96a', '#8a9bb7', '#c0c9d8'];
+  var palette = ['#2e6bf0', '#8b5cf6', '#06b6d4', '#f59e0b', '#f43f5e', '#84cc16', '#0ea5e9', '#f97316', '#c0c9d8'];
   var outcomeNames = { success: '成功', failed: '失败', cancelled: '客户端取消', interrupted: '进程中断', pending: '进行中' };
-  var outcomeColors = ['#60c5a5', '#ee8691', '#edc06f', '#ad96df', '#c6cfde'];
+  var outcomeColors = ['#22c55e', '#f43f5e', '#f59e0b', '#8b5cf6', '#c6cfde'];
+  var themeColor = function (name, fallback) { var value = getComputedStyle(document.documentElement).getPropertyValue(name).trim(); return value || fallback; };
+  function resolveThemeColors() { var neutral = themeColor('--chart-neutral', '#c6cfde'); palette[8] = neutral; outcomeColors[4] = neutral; }
   var numeric = ['attempts','success','failed','cancelled','interrupted','pending','usageKnown','cacheKnown','inputKnown','outputKnown','cachedKnown','totalKnown','reasoningKnown','inputTokens','outputTokens','cachedInputTokens','totalTokens','reasoningTokens','cacheEligibleInput','cacheEligibleCached','uncachedInputTokens','unknownCacheInputTokens','durationMs','finished'];
   var data = null, selectedBucket = null, page = 0, sortKey = 'attempts', sortDirection = -1;
   var selected = { channel: null, model: null }, channelNames = new Map(), chartData = {}, tableRows = [];
@@ -192,7 +194,7 @@
       return { name: outcomeNames[key], color: outcomeColors[Object.keys(outcomeNames).indexOf(key)], values: times.map(function (time) { return sum(byTime.get(time))[key]; }) };
     });
     if (dimension === 'composition') return [
-      ['uncachedInputTokens','未缓存输入','#6785da'], ['cacheEligibleCached','缓存输入','#a9e4d1'], ['unknownCacheInputTokens','缓存状态未知的输入','#c8d1df'], ['outputTokens','输出','#ac97dc'],
+      ['uncachedInputTokens','未缓存输入','#2e6bf0'], ['cacheEligibleCached','缓存输入','#a9e4d1'], ['unknownCacheInputTokens','缓存状态未知的输入',themeColor('--chart-neutral', '#c8d1df')], ['outputTokens','输出','#8b5cf6'],
     ].map(function (item) { return { name: item[1], color: item[2], cached: item[0] === 'cacheEligibleCached', values: times.map(function (time) { var row=sum(byTime.get(time)); var known=item[0]==='outputTokens'?row.outputKnown:item[0]==='unknownCacheInputTokens'?row.inputKnown:row.cacheKnown; return known?row[item[0]]:null; }) }; });
     var keyOf = function (row) { return dimension === 'total' ? '整体' : dimension === 'channel' ? row.channelId : row.model; };
     var totals = new Map();
@@ -276,6 +278,7 @@
   }
   function renderCharts() {
     if (!data) return;
+    resolveThemeColors();
     $('chart-tooltip').hidden=true;
     var times=buckets();
     drawChart('calls',seriesFor($('calls-stack').value,$('calls-metric').value,times),times,false);
@@ -382,6 +385,7 @@
   };
   var resizeTimer;
   window.addEventListener('resize',function () { clearTimeout(resizeTimer); resizeTimer=setTimeout(renderCharts,120); });
+  window.addEventListener('relay-theme',function () { if (data) render(); });
   document.addEventListener('visibilitychange',function () { if (!document.hidden && Number($('auto-refresh').value)) load(); });
 
   var uptimeData, uptimeTimer, uptimeController, uptimeRows = new Map(), uptimeScope = '';

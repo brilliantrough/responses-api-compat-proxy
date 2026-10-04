@@ -3,9 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#ffffff">
+<meta name="theme-color" content="#f6f7f9">
 <title>Admin Configuration · Relay</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ffffff'/%3E%3Cpath d='M8 12v13m8-19v19m8-16v11' stroke='%233b63dc' stroke-width='4'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ffffff'/%3E%3Cpath d='M8 12v13m8-19v19m8-16v11' stroke='%232e6bf0' stroke-width='4'/%3E%3C/svg%3E">
+<script>
+(function(){var key='relay-theme';function stored(){try{return localStorage.getItem(key)}catch(e){return null}}
+function apply(t){document.documentElement.dataset.theme=t;var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content',t==='dark'?'#10141e':'#f6f7f9');}
+apply(stored()==='dark'?'dark':'light');
+document.addEventListener('DOMContentLoaded',function(){var btn=document.getElementById('theme-toggle');if(!btn)return;
+function paint(){var dark=document.documentElement.dataset.theme==='dark';btn.setAttribute('aria-pressed',String(dark));btn.title=dark?'切换到浅色主题':'切换到深色主题';btn.textContent=dark?'☀':'☾';}
+btn.addEventListener('click',function(){var next=document.documentElement.dataset.theme==='dark'?'light':'dark';try{localStorage.setItem(key,next)}catch(e){}apply(next);paint();window.dispatchEvent(new Event('relay-theme'));});paint();});})();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="/admin/assets/admin.css">
 </head>
 <body>
@@ -33,7 +44,7 @@
   <div class="app-main">
     <header class="topbar">
       <div class="breadcrumb">Workspace <span>/</span> <strong id="page-breadcrumb">Channels</strong></div>
-      <div class="topbar-status"><span id="topbar-runtime-version" class="badge">Runtime —</span><span id="topbar-active-requests" class="badge">Active —</span></div>
+      <div class="topbar-status"><span id="topbar-runtime-version" class="badge">Runtime —</span><span id="topbar-active-requests" class="badge">Active —</span><button id="theme-toggle" class="theme-toggle" type="button" aria-label="切换主题">☾</button></div>
     </header>
 
     <main id="main-content" class="content-grid" tabindex="-1">
