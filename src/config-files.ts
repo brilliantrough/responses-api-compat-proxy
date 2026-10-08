@@ -111,8 +111,7 @@ type RawRoutingDocument = Readonly<{
 }>;
 
 function isSecretKey(key: string): boolean {
-  const upper = key.toUpperCase();
-  return upper.includes('KEY') || upper.includes('TOKEN') || upper.includes('SECRET');
+  return /(?:^|_)(?:KEY|TOKEN|SECRET|PASSWORD)(?:_|$)/.test(key.toUpperCase());
 }
 
 export function createConfigFileStore(dir: string): ConfigFileStore {
